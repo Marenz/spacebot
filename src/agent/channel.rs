@@ -286,13 +286,25 @@ impl Channel {
             drop(history);
         }
 
-        // Run the agent loop with the channel's persistent history
-        let mut history = self.state.history.write().await;
+        // Clone history out so the write lock is released before the agentic loop.
+        // The branch tool needs a read lock on history to clone it for the branch,
+        // and holding a write lock across the entire agentic loop would deadlock.
+        // The shared state keeps a snapshot so branches can still read it.
+        let mut history = {
+            let guard = self.state.history.read().await;
+            guard.clone()
+        };
+
         let result = agent.prompt(&user_text)
             .with_history(&mut history)
             .with_hook(self.hook.clone())
             .await;
-        drop(history);
+
+        // Write history back after the agentic loop completes
+        {
+            let mut guard = self.state.history.write().await;
+            *guard = history;
+        }
 
         // Clean up per-turn tools
         if let Err(error) = crate::tools::remove_channel_tools(&self.deps.tool_server).await {

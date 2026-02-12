@@ -59,6 +59,11 @@ impl MemorySearch {
     pub fn embedding_model(&self) -> &EmbeddingModel {
         &self.embedding_model
     }
+
+    /// Get a shared handle to the embedding model (for async embed_one).
+    pub fn embedding_model_arc(&self) -> &Arc<EmbeddingModel> {
+        &self.embedding_model
+    }
     
     /// Perform hybrid search across all memory sources.
     pub async fn hybrid_search(

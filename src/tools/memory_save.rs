@@ -208,11 +208,12 @@ impl Tool for MemorySaveTool {
             let _ = store.create_association(&association).await;
         }
 
-        // Generate and store embedding
+        // Generate and store embedding (async to avoid blocking the tokio runtime)
         let embedding = self
             .memory_search
-            .embedding_model()
-            .embed_one_blocking(&args.content)
+            .embedding_model_arc()
+            .embed_one(&args.content)
+            .await
             .map_err(|e| MemorySaveError(format!("Failed to generate embedding: {e}")))?;
 
         self.memory_search
