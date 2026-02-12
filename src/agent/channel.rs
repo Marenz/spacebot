@@ -2,6 +2,7 @@
 
 use crate::error::{AgentError, Result};
 use crate::llm::SpacebotModel;
+use crate::conversation::ConversationLogger;
 use crate::{ChannelId, WorkerId, BranchId, ProcessId, ProcessType, AgentDeps, InboundMessage, ProcessEvent, OutboundResponse};
 use crate::hooks::SpacebotHook;
 use crate::agent::status::StatusBlock;
@@ -48,6 +49,7 @@ pub struct ChannelState {
     pub branch_system_prompt: String,
     pub worker_system_prompt: String,
     pub max_concurrent_branches: usize,
+    pub conversation_logger: ConversationLogger,
 }
 
 impl std::fmt::Debug for ChannelState {
@@ -103,6 +105,8 @@ impl Channel {
         let active_workers = Arc::new(RwLock::new(HashMap::new()));
         let (message_tx, message_rx) = mpsc::channel(64);
 
+        let conversation_logger = ConversationLogger::new(deps.sqlite_pool.clone());
+
         let state = ChannelState {
             channel_id: id.clone(),
             history: history.clone(),
@@ -114,6 +118,7 @@ impl Channel {
             branch_system_prompt: branch_system_prompt.into(),
             worker_system_prompt: worker_system_prompt.into(),
             max_concurrent_branches: config.max_concurrent_branches,
+            conversation_logger,
         };
 
         let self_tx = message_tx.clone();
@@ -185,6 +190,21 @@ impl Channel {
         // Format the user text with sender attribution so the LLM knows who's talking
         let user_text = format_user_message(&raw_text, &message);
 
+        // Persist user messages (skip system re-triggers)
+        if message.source != "system" {
+            let sender_name = message.metadata
+                .get("sender_display_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&message.sender_id);
+            self.state.conversation_logger.log_user_message(
+                &self.state.channel_id,
+                sender_name,
+                &message.sender_id,
+                &raw_text,
+                &message.metadata,
+            );
+        }
+
         // Capture conversation context from the first message (platform, channel, server)
         if self.conversation_context.is_none() {
             self.conversation_context = Some(build_conversation_context(&message));
@@ -255,6 +275,7 @@ impl Channel {
                 // directly. Some models respond with text instead of tool calls.
                 let text = response.trim();
                 if !text.is_empty() {
+                    self.state.conversation_logger.log_bot_message(&self.state.channel_id, text);
                     if let Err(error) = self.response_tx.send(OutboundResponse::Text(text.to_string())).await {
                         tracing::error!(%error, channel_id = %self.id, "failed to send fallback reply");
                     }

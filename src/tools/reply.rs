@@ -1,6 +1,7 @@
 //! Reply tool for sending messages to users (channel only).
 
-use crate::OutboundResponse;
+use crate::conversation::ConversationLogger;
+use crate::{ChannelId, OutboundResponse};
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use schemars::JsonSchema;
@@ -17,14 +18,23 @@ use tokio::sync::mpsc;
 pub struct ReplyTool {
     response_tx: mpsc::Sender<OutboundResponse>,
     conversation_id: String,
+    conversation_logger: ConversationLogger,
+    channel_id: ChannelId,
 }
 
 impl ReplyTool {
     /// Create a new reply tool bound to a conversation's response channel.
-    pub fn new(response_tx: mpsc::Sender<OutboundResponse>, conversation_id: impl Into<String>) -> Self {
+    pub fn new(
+        response_tx: mpsc::Sender<OutboundResponse>,
+        conversation_id: impl Into<String>,
+        conversation_logger: ConversationLogger,
+        channel_id: ChannelId,
+    ) -> Self {
         Self {
             response_tx,
             conversation_id: conversation_id.into(),
+            conversation_logger,
+            channel_id,
         }
     }
 }
@@ -79,6 +89,8 @@ impl Tool for ReplyTool {
             content_len = args.content.len(),
             "reply tool called"
         );
+
+        self.conversation_logger.log_bot_message(&self.channel_id, &args.content);
 
         let response = OutboundResponse::Text(args.content.clone());
 

@@ -78,7 +78,12 @@ pub async fn add_channel_tools(
     response_tx: mpsc::Sender<OutboundResponse>,
     conversation_id: impl Into<String>,
 ) -> Result<(), rig::tool::server::ToolServerError> {
-    handle.add_tool(ReplyTool::new(response_tx, conversation_id)).await?;
+    handle.add_tool(ReplyTool::new(
+        response_tx,
+        conversation_id,
+        state.conversation_logger.clone(),
+        state.channel_id.clone(),
+    )).await?;
     handle.add_tool(BranchTool::new(state.clone())).await?;
     handle.add_tool(SpawnWorkerTool::new(state.clone())).await?;
     handle.add_tool(RouteTool::new(state.clone())).await?;

@@ -124,6 +124,7 @@ async fn main() -> anyhow::Result<()> {
             tool_server,
             routing: agent_config.routing.clone(),
             event_tx,
+            sqlite_pool: db.sqlite.clone(),
         };
 
         // Scaffold identity templates if missing, then load

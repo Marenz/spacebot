@@ -1,177 +1,131 @@
-//! Conversation history persistence (SQLite).
+//! Conversation message persistence (SQLite).
 
-use crate::error::Result;
-use crate::{ChannelId, InboundMessage, OutboundResponse};
-use anyhow::Context as _;
-use sqlx::SqlitePool;
+use crate::ChannelId;
+use sqlx::{Row as _, SqlitePool};
+use std::collections::HashMap;
 
-/// History store for conversations.
-pub struct HistoryStore {
+/// Persists conversation messages (user and assistant) to SQLite.
+///
+/// All write methods are fire-and-forget — they spawn a tokio task and return
+/// immediately so the caller never blocks on a DB write.
+#[derive(Debug, Clone)]
+pub struct ConversationLogger {
     pool: SqlitePool,
 }
 
-/// A conversation turn (message + response pair).
+/// A persisted conversation message.
 #[derive(Debug, Clone)]
-pub struct ConversationTurn {
+pub struct ConversationMessage {
     pub id: String,
-    pub channel_id: ChannelId,
-    pub sequence: i64,
-    pub inbound_message: String,
-    pub outbound_response: Option<String>,
+    pub channel_id: String,
+    pub role: String,
+    pub sender_name: Option<String>,
+    pub sender_id: Option<String>,
+    pub content: String,
+    pub metadata: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
-/// Summary of a compaction (replaces raw turns).
-#[derive(Debug, Clone)]
-pub struct CompactionSummary {
-    pub id: String,
-    pub channel_id: ChannelId,
-    pub start_sequence: i64,
-    pub end_sequence: i64,
-    pub summary_text: String,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-}
-
-impl HistoryStore {
-    /// Create a new history store.
+impl ConversationLogger {
     pub fn new(pool: SqlitePool) -> Self {
         Self { pool }
     }
-    
-    /// Save a conversation turn.
-    pub async fn save_turn(
+
+    /// Log a user message. Fire-and-forget.
+    pub fn log_user_message(
         &self,
         channel_id: &ChannelId,
-        sequence: i64,
-        inbound: &str,
-        outbound: Option<&str>,
-    ) -> Result<()> {
+        sender_name: &str,
+        sender_id: &str,
+        content: &str,
+        metadata: &HashMap<String, serde_json::Value>,
+    ) {
+        let pool = self.pool.clone();
         let id = uuid::Uuid::new_v4().to_string();
-        
-        sqlx::query(
-            r#"
-            INSERT INTO conversation_turns (id, channel_id, sequence, inbound_message, outbound_response)
-            VALUES (?, ?, ?, ?, ?)
-            "#
-        )
-        .bind(&id)
-        .bind(channel_id.as_ref())
-        .bind(sequence)
-        .bind(inbound)
-        .bind(outbound)
-        .execute(&self.pool)
-        .await
-        .context("failed to save conversation turn")?;
-        
-        Ok(())
+        let channel_id = channel_id.to_string();
+        let sender_name = sender_name.to_string();
+        let sender_id = sender_id.to_string();
+        let content = content.to_string();
+        let metadata_json = serde_json::to_string(metadata).ok();
+
+        tokio::spawn(async move {
+            if let Err(error) = sqlx::query(
+                "INSERT INTO conversation_messages (id, channel_id, role, sender_name, sender_id, content, metadata) \
+                 VALUES (?, ?, 'user', ?, ?, ?, ?)"
+            )
+            .bind(&id)
+            .bind(&channel_id)
+            .bind(&sender_name)
+            .bind(&sender_id)
+            .bind(&content)
+            .bind(&metadata_json)
+            .execute(&pool)
+            .await
+            {
+                tracing::warn!(%error, "failed to persist user message");
+            }
+        });
     }
-    
-    /// Get the next sequence number for a channel.
-    pub async fn next_sequence(&self, channel_id: &ChannelId) -> Result<i64> {
-        let row = sqlx::query(
-            "SELECT COALESCE(MAX(sequence), 0) + 1 as next_seq FROM conversation_turns WHERE channel_id = ?"
-        )
-        .bind(channel_id.as_ref())
-        .fetch_one(&self.pool)
-        .await
-        .context("failed to get next sequence")?;
-        
-        let next_seq: i64 = row.try_get("next_seq")?;
-        Ok(next_seq)
+
+    /// Log a bot (assistant) message. Fire-and-forget.
+    pub fn log_bot_message(&self, channel_id: &ChannelId, content: &str) {
+        let pool = self.pool.clone();
+        let id = uuid::Uuid::new_v4().to_string();
+        let channel_id = channel_id.to_string();
+        let content = content.to_string();
+
+        tokio::spawn(async move {
+            if let Err(error) = sqlx::query(
+                "INSERT INTO conversation_messages (id, channel_id, role, content) \
+                 VALUES (?, ?, 'assistant', ?)"
+            )
+            .bind(&id)
+            .bind(&channel_id)
+            .bind(&content)
+            .execute(&pool)
+            .await
+            {
+                tracing::warn!(%error, "failed to persist bot message");
+            }
+        });
     }
-    
-    /// Load recent conversation history for a channel.
-    pub async fn load_recent(&self, channel_id: &ChannelId, limit: i64) -> Result<Vec<ConversationTurn>> {
+
+    /// Load recent messages for a channel (oldest first).
+    pub async fn load_recent(
+        &self,
+        channel_id: &ChannelId,
+        limit: i64,
+    ) -> crate::error::Result<Vec<ConversationMessage>> {
         let rows = sqlx::query(
-            r#"
-            SELECT id, channel_id, sequence, inbound_message, outbound_response, created_at
-            FROM conversation_turns
-            WHERE channel_id = ?
-            ORDER BY sequence DESC
-            LIMIT ?
-            "#
+            "SELECT id, channel_id, role, sender_name, sender_id, content, metadata, created_at \
+             FROM conversation_messages \
+             WHERE channel_id = ? \
+             ORDER BY created_at DESC \
+             LIMIT ?"
         )
         .bind(channel_id.as_ref())
         .bind(limit)
         .fetch_all(&self.pool)
         .await
-        .context("failed to load conversation history")?;
-        
-        let mut turns: Vec<ConversationTurn> = rows
+        .map_err(|e| anyhow::anyhow!(e))?;
+
+        let mut messages: Vec<ConversationMessage> = rows
             .into_iter()
-            .map(|row| ConversationTurn {
+            .map(|row| ConversationMessage {
                 id: row.try_get("id").unwrap_or_default(),
-                channel_id: ChannelId::from(row.try_get::<String, _>("channel_id").unwrap_or_default()),
-                sequence: row.try_get("sequence").unwrap_or(0),
-                inbound_message: row.try_get("inbound_message").unwrap_or_default(),
-                outbound_response: row.try_get("outbound_response").ok(),
+                channel_id: row.try_get("channel_id").unwrap_or_default(),
+                role: row.try_get("role").unwrap_or_default(),
+                sender_name: row.try_get("sender_name").ok(),
+                sender_id: row.try_get("sender_id").ok(),
+                content: row.try_get("content").unwrap_or_default(),
+                metadata: row.try_get("metadata").ok(),
                 created_at: row.try_get("created_at").unwrap_or_else(|_| chrono::Utc::now()),
             })
             .collect();
-        
-        // Reverse to get chronological order
-        turns.reverse();
-        
-        Ok(turns)
-    }
-    
-    /// Save a compaction summary.
-    pub async fn save_compaction_summary(
-        &self,
-        channel_id: &ChannelId,
-        start_sequence: i64,
-        end_sequence: i64,
-        summary: &str,
-    ) -> Result<()> {
-        let id = uuid::Uuid::new_v4().to_string();
-        
-        sqlx::query(
-            r#"
-            INSERT INTO compaction_summaries (id, channel_id, start_sequence, end_sequence, summary_text)
-            VALUES (?, ?, ?, ?, ?)
-            "#
-        )
-        .bind(&id)
-        .bind(channel_id.as_ref())
-        .bind(start_sequence)
-        .bind(end_sequence)
-        .bind(summary)
-        .execute(&self.pool)
-        .await
-        .context("failed to save compaction summary")?;
-        
-        Ok(())
-    }
-    
-    /// Load compaction summaries for a channel (oldest first).
-    pub async fn load_summaries(&self, channel_id: &ChannelId) -> Result<Vec<CompactionSummary>> {
-        let rows = sqlx::query(
-            r#"
-            SELECT id, channel_id, start_sequence, end_sequence, summary_text, created_at
-            FROM compaction_summaries
-            WHERE channel_id = ?
-            ORDER BY start_sequence ASC
-            "#
-        )
-        .bind(channel_id.as_ref())
-        .fetch_all(&self.pool)
-        .await
-        .context("failed to load compaction summaries")?;
-        
-        let summaries = rows
-            .into_iter()
-            .map(|row| CompactionSummary {
-                id: row.try_get("id").unwrap_or_default(),
-                channel_id: ChannelId::from(row.try_get::<String, _>("channel_id").unwrap_or_default()),
-                start_sequence: row.try_get("start_sequence").unwrap_or(0),
-                end_sequence: row.try_get("end_sequence").unwrap_or(0),
-                summary_text: row.try_get("summary_text").unwrap_or_default(),
-                created_at: row.try_get("created_at").unwrap_or_else(|_| chrono::Utc::now()),
-            })
-            .collect();
-        
-        Ok(summaries)
+
+        // Reverse to chronological order
+        messages.reverse();
+
+        Ok(messages)
     }
 }
-
-use sqlx::Row as _;

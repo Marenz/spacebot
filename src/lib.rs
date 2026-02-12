@@ -134,6 +134,7 @@ pub struct AgentDeps {
     pub tool_server: rig::tool::server::ToolServerHandle,
     pub routing: llm::RoutingConfig,
     pub event_tx: tokio::sync::broadcast::Sender<ProcessEvent>,
+    pub sqlite_pool: sqlx::SqlitePool,
 }
 
 impl AgentDeps {

@@ -1,24 +1,14 @@
--- Conversation turns table (raw message history)
-CREATE TABLE IF NOT EXISTS conversation_turns (
+-- Conversation messages (one row per message, user or assistant)
+CREATE TABLE IF NOT EXISTS conversation_messages (
     id TEXT PRIMARY KEY,
     channel_id TEXT NOT NULL,
-    sequence INTEGER NOT NULL,
-    inbound_message TEXT NOT NULL,
-    outbound_response TEXT,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE(channel_id, sequence)
-);
-
--- Compaction summaries table (replaces archived conversation turns)
-CREATE TABLE IF NOT EXISTS compaction_summaries (
-    id TEXT PRIMARY KEY,
-    channel_id TEXT NOT NULL,
-    start_sequence INTEGER NOT NULL,
-    end_sequence INTEGER NOT NULL,
-    summary_text TEXT NOT NULL,
+    role TEXT NOT NULL,              -- 'user' or 'assistant'
+    sender_name TEXT,                -- display name (null for assistant)
+    sender_id TEXT,                  -- platform user ID (null for assistant)
+    content TEXT NOT NULL,
+    metadata TEXT,                   -- JSON blob with platform-specific fields
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
--- Indexes for conversation queries
-CREATE INDEX IF NOT EXISTS idx_turns_channel ON conversation_turns(channel_id);
-CREATE INDEX IF NOT EXISTS idx_turns_sequence ON conversation_turns(channel_id, sequence);
+CREATE INDEX IF NOT EXISTS idx_messages_channel ON conversation_messages(channel_id);
+CREATE INDEX IF NOT EXISTS idx_messages_channel_time ON conversation_messages(channel_id, created_at);
