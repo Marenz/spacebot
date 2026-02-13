@@ -1,20 +1,8 @@
 import { QueryClient, QueryClientProvider, useQuery } from "@tanstack/react-query";
-import { useCallback, useEffect, useMemo, useState } from "react";
-import {
-	api,
-	type ChannelInfo,
-	type InboundMessageEvent,
-	type OutboundMessageEvent,
-	type TypingStateEvent,
-	type WorkerStartedEvent,
-	type WorkerStatusEvent,
-	type WorkerCompletedEvent,
-	type BranchStartedEvent,
-	type BranchCompletedEvent,
-	type ToolStartedEvent,
-	type ToolCompletedEvent,
-} from "./api/client";
-import { useEventSource } from "./hooks/useEventSource";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { api, type ChannelInfo } from "./api/client";
+import { useEventSource, type ConnectionState } from "./hooks/useEventSource";
+import { useChannelLiveState, type ActiveBranch, type ActiveWorker, type ChannelLiveState } from "./hooks/useChannelLiveState";
 
 const queryClient = new QueryClient({
 	defaultOptions: {
@@ -26,46 +14,9 @@ const queryClient = new QueryClient({
 	},
 });
 
-interface ChatMessage {
-	id: string;
-	sender: "user" | "bot";
-	senderName?: string;
-	text: string;
-	timestamp: number;
-}
-
-interface ActiveWorker {
-	id: string;
-	task: string;
-	status: string;
-	startedAt: number;
-	toolCalls: number;
-	currentTool: string | null;
-}
-
-interface ActiveBranch {
-	id: string;
-	description: string;
-	startedAt: number;
-	currentTool: string | null;
-	lastTool: string | null;
-	toolCalls: number;
-}
-
-interface ChannelLiveState {
-	isTyping: boolean;
-	messages: ChatMessage[];
-	workers: Record<string, ActiveWorker>;
-	branches: Record<string, ActiveBranch>;
-	historyLoaded: boolean;
-}
-
 const VISIBLE_MESSAGES = 6;
-const MAX_MESSAGES = 50;
 
-function emptyLiveState(): ChannelLiveState {
-	return { isTyping: false, messages: [], workers: {}, branches: {}, historyLoaded: false };
-}
+// -- Formatting utilities --
 
 function formatUptime(seconds: number): string {
 	const hours = Math.floor(seconds / 3600);
@@ -88,8 +39,7 @@ function formatTimestamp(ts: number): string {
 	return new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
-function formatDuration(startMs: number): string {
-	const seconds = Math.floor((Date.now() - startMs) / 1000);
+function formatDuration(seconds: number): string {
 	if (seconds < 60) return `${seconds}s`;
 	return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
 }
@@ -113,6 +63,42 @@ function platformColor(platform: string): string {
 		case "cron": return "bg-amber-500/20 text-amber-400";
 		default: return "bg-gray-500/20 text-gray-400";
 	}
+}
+
+// -- Components --
+
+function ConnectionBanner({ state }: { state: ConnectionState }) {
+	if (state === "connected") return null;
+
+	const config: Record<Exclude<ConnectionState, "connected">, { label: string; color: string }> = {
+		connecting: { label: "Connecting...", color: "bg-blue-500/10 text-blue-400 border-blue-500/20" },
+		reconnecting: { label: "Reconnecting... Dashboard may show stale data.", color: "bg-amber-500/10 text-amber-400 border-amber-500/20" },
+		disconnected: { label: "Disconnected from server.", color: "bg-red-500/10 text-red-400 border-red-500/20" },
+	};
+
+	const { label, color } = config[state];
+
+	return (
+		<div className={`border-b px-4 py-2 text-sm ${color}`}>
+			<div className="mx-auto flex max-w-5xl items-center gap-2">
+				<div className="h-1.5 w-1.5 animate-pulse rounded-full bg-current" />
+				{label}
+			</div>
+		</div>
+	);
+}
+
+/** Ticking duration display that updates every second while the component is mounted. */
+function LiveDuration({ startMs }: { startMs: number }) {
+	const [now, setNow] = useState(Date.now());
+
+	useEffect(() => {
+		const interval = setInterval(() => setNow(Date.now()), 1000);
+		return () => clearInterval(interval);
+	}, []);
+
+	const seconds = Math.floor((now - startMs) / 1000);
+	return <span>{formatDuration(seconds)}</span>;
 }
 
 function WorkerBadge({ worker }: { worker: ActiveWorker }) {
@@ -155,7 +141,7 @@ function BranchBadge({ branch }: { branch: ActiveBranch }) {
 					<span className="truncate text-ink-dull">{branch.description}</span>
 				</div>
 				<div className="mt-0.5 flex items-center gap-2 text-ink-faint">
-					<span>{formatDuration(branch.startedAt)}</span>
+					<LiveDuration startMs={branch.startedAt} />
 					{displayTool && (
 						<>
 							<span className="text-ink-faint/50">·</span>
@@ -270,368 +256,68 @@ function ChannelCard({
 }
 
 function Dashboard() {
-	const { data: statusData } = useQuery({
+	const { data: statusData, isError: statusError } = useQuery({
 		queryKey: ["status"],
 		queryFn: api.status,
 		refetchInterval: 5000,
 	});
 
-	const { data: channelsData, isLoading: channelsLoading } = useQuery({
+	const { data: channelsData, isLoading: channelsLoading, isError: channelsError } = useQuery({
 		queryKey: ["channels"],
 		queryFn: api.channels,
 		refetchInterval: 10000,
 	});
 
-	const [liveStates, setLiveStates] = useState<Record<string, ChannelLiveState>>({});
-
-	// Load conversation history for each channel on first appearance
 	const channels = channelsData?.channels ?? [];
+	const { liveStates, handlers, syncStatusSnapshot } = useChannelLiveState(channels);
+
+	const onReconnect = useCallback(() => {
+		syncStatusSnapshot();
+		queryClient.invalidateQueries({ queryKey: ["channels"] });
+		queryClient.invalidateQueries({ queryKey: ["status"] });
+	}, [syncStatusSnapshot]);
+
+	const { connectionState } = useEventSource(api.eventsUrl, {
+		handlers,
+		onReconnect,
+	});
+
+	// Invalidate channel list when we get new messages
+	const prevChannelCount = useRef(channels.length);
 	useEffect(() => {
-		for (const channel of channels) {
-			setLiveStates((prev) => {
-				if (prev[channel.id]?.historyLoaded) return prev;
-
-				const updated = {
-					...prev,
-					[channel.id]: { ...(prev[channel.id] ?? emptyLiveState()), historyLoaded: true },
-				};
-
-				api.channelMessages(channel.id, MAX_MESSAGES).then((data) => {
-					const history: ChatMessage[] = data.messages.map((message) => ({
-						id: message.id,
-						sender: message.role === "user" ? "user" as const : "bot" as const,
-						senderName: message.sender_name ?? (message.role === "user" ? message.sender_id ?? undefined : undefined),
-						text: message.content,
-						timestamp: new Date(message.created_at).getTime(),
-					}));
-
-					setLiveStates((current) => {
-						const existing = current[channel.id];
-						if (!existing) return current;
-						const sseMessages = existing.messages;
-						const lastHistoryTs = history.length > 0 ? history[history.length - 1].timestamp : 0;
-						const newSseMessages = sseMessages.filter((m) => m.timestamp > lastHistoryTs);
-						return {
-							...current,
-							[channel.id]: {
-								...existing,
-								messages: [...history, ...newSseMessages].slice(-MAX_MESSAGES),
-							},
-						};
-					});
-				}).catch((error) => {
-					console.warn(`Failed to load history for ${channel.id}:`, error);
-				});
-
-				return updated;
-			});
+		if (channels.length !== prevChannelCount.current) {
+			prevChannelCount.current = channels.length;
 		}
-	}, [channels]);
-
-	// Fetch channel status snapshot once on mount for initial state
-	useEffect(() => {
-		api.channelStatus().then((statusMap) => {
-			setLiveStates((prev) => {
-				const next = { ...prev };
-				for (const [channelId, snapshot] of Object.entries(statusMap)) {
-					const existing = next[channelId] ?? emptyLiveState();
-					const workers: Record<string, ActiveWorker> = {};
-					for (const w of snapshot.active_workers) {
-						workers[w.id] = {
-							id: w.id,
-							task: w.task,
-							status: w.status,
-							startedAt: new Date(w.started_at).getTime(),
-							toolCalls: w.tool_calls,
-							currentTool: null,
-						};
-					}
-						const branches: Record<string, ActiveBranch> = {};
-						for (const b of snapshot.active_branches) {
-							branches[b.id] = {
-								id: b.id,
-								description: b.description,
-								startedAt: new Date(b.started_at).getTime(),
-								currentTool: null,
-								lastTool: null,
-								toolCalls: 0,
-							};
-						}
-					next[channelId] = { ...existing, workers, branches };
-				}
-				return next;
-			});
-		}).catch(() => {});
-	}, []);
-
-	const getState = useCallback((channelId: string) => {
-		return (prev: Record<string, ChannelLiveState>) =>
-			prev[channelId] ?? emptyLiveState();
-	}, []);
-
-	const pushMessage = useCallback((channelId: string, message: ChatMessage) => {
-		setLiveStates((prev) => {
-			const existing = getState(channelId)(prev);
-			const messages = [...existing.messages, message].slice(-MAX_MESSAGES);
-			return { ...prev, [channelId]: { ...existing, messages } };
-		});
-	}, [getState]);
-
-	const handleInboundMessage = useCallback((data: unknown) => {
-		const event = data as InboundMessageEvent;
-		pushMessage(event.channel_id, {
-			id: `in-${Date.now()}-${Math.random()}`,
-			sender: "user",
-			senderName: event.sender_id,
-			text: event.text,
-			timestamp: Date.now(),
-		});
-		queryClient.invalidateQueries({ queryKey: ["channels"] });
-	}, [pushMessage]);
-
-	const handleOutboundMessage = useCallback((data: unknown) => {
-		const event = data as OutboundMessageEvent;
-		pushMessage(event.channel_id, {
-			id: `out-${Date.now()}-${Math.random()}`,
-			sender: "bot",
-			text: event.text,
-			timestamp: Date.now(),
-		});
-		setLiveStates((prev) => {
-			const existing = getState(event.channel_id)(prev);
-			return { ...prev, [event.channel_id]: { ...existing, isTyping: false } };
-		});
-		queryClient.invalidateQueries({ queryKey: ["channels"] });
-	}, [pushMessage, getState]);
-
-	const handleTypingState = useCallback((data: unknown) => {
-		const event = data as TypingStateEvent;
-		setLiveStates((prev) => {
-			const existing = getState(event.channel_id)(prev);
-			return { ...prev, [event.channel_id]: { ...existing, isTyping: event.is_typing } };
-		});
-	}, [getState]);
-
-	const handleWorkerStarted = useCallback((data: unknown) => {
-		const event = data as WorkerStartedEvent;
-		setLiveStates((prev) => {
-			const existing = getState(event.channel_id)(prev);
-			return {
-				...prev,
-				[event.channel_id]: {
-					...existing,
-					workers: {
-						...existing.workers,
-						[event.worker_id]: {
-							id: event.worker_id,
-							task: event.task,
-							status: "starting",
-							startedAt: Date.now(),
-							toolCalls: 0,
-							currentTool: null,
-						},
-					},
-				},
-			};
-		});
-	}, [getState]);
-
-	const handleWorkerStatus = useCallback((data: unknown) => {
-		const event = data as WorkerStatusEvent;
-		setLiveStates((prev) => {
-			for (const [channelId, state] of Object.entries(prev)) {
-				const worker = state.workers[event.worker_id];
-				if (worker) {
-					return {
-						...prev,
-						[channelId]: {
-							...state,
-							workers: {
-								...state.workers,
-								[event.worker_id]: { ...worker, status: event.status },
-							},
-						},
-					};
-				}
-			}
-			return prev;
-		});
-	}, []);
-
-	const handleWorkerCompleted = useCallback((data: unknown) => {
-		const event = data as WorkerCompletedEvent;
-		setLiveStates((prev) => {
-			for (const [channelId, state] of Object.entries(prev)) {
-				if (state.workers[event.worker_id]) {
-					const { [event.worker_id]: _, ...remainingWorkers } = state.workers;
-					return {
-						...prev,
-						[channelId]: { ...state, workers: remainingWorkers },
-					};
-				}
-			}
-			return prev;
-		});
-	}, []);
-
-	const handleBranchStarted = useCallback((data: unknown) => {
-		const event = data as BranchStartedEvent;
-		setLiveStates((prev) => {
-			const existing = getState(event.channel_id)(prev);
-			return {
-				...prev,
-				[event.channel_id]: {
-					...existing,
-					branches: {
-						...existing.branches,
-						[event.branch_id]: {
-							id: event.branch_id,
-							description: event.description || "thinking...",
-							startedAt: Date.now(),
-							currentTool: null,
-							lastTool: null,
-							toolCalls: 0,
-						},
-					},
-				},
-			};
-		});
-	}, [getState]);
-
-	const handleBranchCompleted = useCallback((data: unknown) => {
-		const event = data as BranchCompletedEvent;
-		setLiveStates((prev) => {
-			for (const [channelId, state] of Object.entries(prev)) {
-				if (state.branches[event.branch_id]) {
-					const { [event.branch_id]: _, ...remainingBranches } = state.branches;
-					return {
-						...prev,
-						[channelId]: { ...state, branches: remainingBranches },
-					};
-				}
-			}
-			return prev;
-		});
-	}, []);
-
-	const handleToolStarted = useCallback((data: unknown) => {
-		const event = data as ToolStartedEvent;
-		setLiveStates((prev) => {
-			for (const [channelId, state] of Object.entries(prev)) {
-				if (event.process_type === "worker" && state.workers[event.process_id]) {
-					const worker = state.workers[event.process_id];
-					return {
-						...prev,
-						[channelId]: {
-							...state,
-							workers: {
-								...state.workers,
-								[event.process_id]: { ...worker, currentTool: event.tool_name },
-							},
-						},
-					};
-				}
-				if (event.process_type === "branch" && state.branches[event.process_id]) {
-					const branch = state.branches[event.process_id];
-					return {
-						...prev,
-						[channelId]: {
-							...state,
-							branches: {
-								...state.branches,
-								[event.process_id]: { ...branch, currentTool: event.tool_name },
-							},
-						},
-					};
-				}
-			}
-			return prev;
-		});
-	}, []);
-
-	const handleToolCompleted = useCallback((data: unknown) => {
-		const event = data as ToolCompletedEvent;
-		setLiveStates((prev) => {
-			for (const [channelId, state] of Object.entries(prev)) {
-				if (event.process_type === "worker" && state.workers[event.process_id]) {
-					const worker = state.workers[event.process_id];
-					return {
-						...prev,
-						[channelId]: {
-							...state,
-							workers: {
-								...state.workers,
-								[event.process_id]: {
-									...worker,
-									currentTool: null,
-									toolCalls: worker.toolCalls + 1,
-								},
-							},
-						},
-					};
-				}
-				if (event.process_type === "branch" && state.branches[event.process_id]) {
-					const branch = state.branches[event.process_id];
-					return {
-						...prev,
-						[channelId]: {
-							...state,
-							branches: {
-								...state.branches,
-								[event.process_id]: {
-									...branch,
-									currentTool: null,
-									lastTool: event.tool_name,
-									toolCalls: branch.toolCalls + 1,
-								},
-							},
-						},
-					};
-				}
-			}
-			return prev;
-		});
-	}, []);
-
-	const handlers = useMemo(() => ({
-		inbound_message: handleInboundMessage,
-		outbound_message: handleOutboundMessage,
-		typing_state: handleTypingState,
-		worker_started: handleWorkerStarted,
-		worker_status: handleWorkerStatus,
-		worker_completed: handleWorkerCompleted,
-		branch_started: handleBranchStarted,
-		branch_completed: handleBranchCompleted,
-		tool_started: handleToolStarted,
-		tool_completed: handleToolCompleted,
-	}), [
-		handleInboundMessage, handleOutboundMessage, handleTypingState,
-		handleWorkerStarted, handleWorkerStatus, handleWorkerCompleted,
-		handleBranchStarted, handleBranchCompleted,
-		handleToolStarted, handleToolCompleted,
-	]);
-
-	useEventSource(api.eventsUrl, { handlers });
+	}, [channels.length]);
 
 	// Count totals for header
-	const totalWorkers = Object.values(liveStates).reduce(
-		(sum, s) => sum + Object.keys(s.workers).length, 0,
+	const totalWorkers = useMemo(
+		() => Object.values(liveStates).reduce((sum, s) => sum + Object.keys(s.workers).length, 0),
+		[liveStates],
 	);
-	const totalBranches = Object.values(liveStates).reduce(
-		(sum, s) => sum + Object.keys(s.branches).length, 0,
+	const totalBranches = useMemo(
+		() => Object.values(liveStates).reduce((sum, s) => sum + Object.keys(s.branches).length, 0),
+		[liveStates],
 	);
 
 	return (
 		<div className="min-h-screen bg-app">
+			<ConnectionBanner state={connectionState} />
+
 			{/* Header */}
-			<div className="border-b border-app-line bg-app-darkBox/50 px-6 py-4">
+			<header className="border-b border-app-line bg-app-darkBox/50 px-6 py-4">
 				<div className="mx-auto flex max-w-5xl items-center justify-between">
 					<div>
 						<h1 className="font-plex text-lg font-semibold text-ink">Spacebot</h1>
 						<p className="text-tiny text-ink-faint">Control Interface</p>
 					</div>
 					<div className="flex items-center gap-4 text-sm">
-						{statusData && (
+						{statusError ? (
+							<div className="flex items-center gap-1.5">
+								<div className="h-2 w-2 rounded-full bg-red-500" />
+								<span className="text-red-400">Unreachable</span>
+							</div>
+						) : statusData ? (
 							<>
 								<div className="flex items-center gap-1.5">
 									<div className="h-2 w-2 rounded-full bg-green-500" />
@@ -641,7 +327,7 @@ function Dashboard() {
 									{formatUptime(statusData.uptime_seconds)}
 								</span>
 							</>
-						)}
+						) : null}
 						{(totalWorkers > 0 || totalBranches > 0) && (
 							<div className="flex items-center gap-2 text-tiny">
 								{totalWorkers > 0 && (
@@ -658,10 +344,10 @@ function Dashboard() {
 						)}
 					</div>
 				</div>
-			</div>
+			</header>
 
 			{/* Content */}
-			<div className="mx-auto max-w-5xl p-6">
+			<main className="mx-auto max-w-5xl p-6">
 				<div className="mb-4 flex items-center justify-between">
 					<h2 className="font-plex text-sm font-medium text-ink-dull">
 						Active Channels
@@ -676,10 +362,16 @@ function Dashboard() {
 						<div className="h-2 w-2 animate-pulse rounded-full bg-accent" />
 						Loading channels...
 					</div>
+				) : channelsError ? (
+					<div className="rounded-lg border border-dashed border-red-500/30 p-8 text-center">
+						<p className="text-sm text-red-400">
+							Failed to load channels. Is the daemon running?
+						</p>
+					</div>
 				) : channels.length === 0 ? (
 					<div className="rounded-lg border border-dashed border-app-line p-8 text-center">
 						<p className="text-sm text-ink-faint">
-							No active channels. Send a message via Discord, Slack, or webhook to get started.
+							No active channels. Send a message via Discord, Telegram, or webhook to get started.
 						</p>
 					</div>
 				) : (
@@ -693,7 +385,7 @@ function Dashboard() {
 						))}
 					</div>
 				)}
-			</div>
+			</main>
 		</div>
 	);
 }

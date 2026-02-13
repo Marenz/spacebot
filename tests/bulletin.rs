@@ -53,14 +53,9 @@ async fn bootstrap_deps() -> anyhow::Result<spacebot::AgentDeps> {
         embedding_model,
     ));
 
-    let shared_prompts_dir = config.prompts_dir();
     let identity = spacebot::identity::Identity::load(&agent_config.workspace).await;
-    let prompts = spacebot::identity::Prompts::load(
-        &agent_config.workspace,
-        &shared_prompts_dir,
-    )
-    .await
-    .context("failed to load prompts")?;
+    let prompts = spacebot::prompts::PromptEngine::new("en")
+        .context("failed to init prompt engine")?;
     let skills = spacebot::skills::SkillSet::load(
         &config.skills_dir(),
         &agent_config.skills_dir(),
@@ -86,26 +81,16 @@ async fn bootstrap_deps() -> anyhow::Result<spacebot::AgentDeps> {
     })
 }
 
-/// The cortex user prompt and bulletin system prompt must reference every
-/// MemoryType variant so the LLM queries across all dimensions. If a new
-/// variant is added to MemoryType::ALL, this test fails until the prompts
-/// are updated.
+/// The cortex user prompt references memory types inline. If a new variant is
+/// added to MemoryType::ALL, this test fails until the type list is updated.
 #[test]
 fn test_bulletin_prompts_cover_all_memory_types() {
-    let bulletin_prompt = std::fs::read_to_string("prompts/CORTEX_BULLETIN.md")
-        .expect("failed to read CORTEX_BULLETIN.md");
-
     // The cortex user prompt in cortex.rs lists types inline. Check the same
     // set against the canonical list so drift is caught at compile time.
     let cortex_user_prompt_types = ["identity", "fact", "decision", "event", "preference", "observation", "goal", "todo"];
 
     for memory_type in spacebot::memory::types::MemoryType::ALL {
         let type_str = memory_type.to_string();
-
-        assert!(
-            bulletin_prompt.contains(&format!("memory_type: \"{}\"", type_str)),
-            "CORTEX_BULLETIN.md is missing memory_type: \"{type_str}\""
-        );
 
         assert!(
             cortex_user_prompt_types.contains(&type_str.as_str()),

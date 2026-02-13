@@ -1,5 +1,9 @@
 //! HTTP server setup: router, static file serving, and API routes.
 
+use super::state::{ApiEvent, ApiState};
+use crate::conversation::channels::ChannelStore;
+use crate::conversation::history::ConversationLogger;
+
 use axum::extract::{Query, State};
 use axum::http::{header, StatusCode, Uri};
 use axum::response::{Html, IntoResponse, Json, Response, Sse};
@@ -7,21 +11,64 @@ use axum::routing::get;
 use axum::Router;
 use futures::stream::Stream;
 use rust_embed::Embed;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use tower_http::cors::{Any, CorsLayer};
+
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tower_http::cors::{Any, CorsLayer};
-
-use super::state::{ApiEvent, ApiState};
-use crate::conversation::channels::ChannelStore;
-use crate::conversation::history::ConversationLogger;
 
 /// Embedded frontend assets from the Vite build output.
 #[derive(Embed)]
 #[folder = "interface/dist/"]
 #[allow(unused)]
 struct InterfaceAssets;
+
+// -- Response types --
+
+#[derive(Serialize)]
+struct HealthResponse {
+    status: &'static str,
+}
+
+#[derive(Serialize)]
+struct StatusResponse {
+    status: &'static str,
+    pid: u32,
+    uptime_seconds: u64,
+}
+
+#[derive(Serialize)]
+struct ChannelResponse {
+    agent_id: String,
+    id: String,
+    platform: String,
+    display_name: Option<String>,
+    is_active: bool,
+    last_activity_at: String,
+    created_at: String,
+}
+
+#[derive(Serialize)]
+struct ChannelsResponse {
+    channels: Vec<ChannelResponse>,
+}
+
+#[derive(Serialize)]
+struct MessageResponse {
+    id: String,
+    role: String,
+    sender_name: Option<String>,
+    sender_id: Option<String>,
+    content: String,
+    created_at: String,
+}
+
+#[derive(Serialize)]
+struct MessagesResponse {
+    messages: Vec<MessageResponse>,
+}
 
 /// Start the HTTP server on the given address.
 ///
@@ -56,12 +103,14 @@ pub async fn start_http_server(
 
     let handle = tokio::spawn(async move {
         let mut shutdown = shutdown_rx;
-        axum::serve(listener, app)
+        if let Err(error) = axum::serve(listener, app)
             .with_graceful_shutdown(async move {
                 let _ = shutdown.wait_for(|v| *v).await;
             })
             .await
-            .ok();
+        {
+            tracing::error!(%error, "HTTP server exited with error");
+        }
     });
 
     Ok(handle)
@@ -69,17 +118,17 @@ pub async fn start_http_server(
 
 // -- API handlers --
 
-async fn health() -> Json<serde_json::Value> {
-    Json(serde_json::json!({ "status": "ok" }))
+async fn health() -> Json<HealthResponse> {
+    Json(HealthResponse { status: "ok" })
 }
 
-async fn status(State(state): State<Arc<ApiState>>) -> Json<serde_json::Value> {
+async fn status(State(state): State<Arc<ApiState>>) -> Json<StatusResponse> {
     let uptime = state.started_at.elapsed();
-    Json(serde_json::json!({
-        "status": "running",
-        "pid": std::process::id(),
-        "uptime_seconds": uptime.as_secs(),
-    }))
+    Json(StatusResponse {
+        status: "running",
+        pid: std::process::id(),
+        uptime_seconds: uptime.as_secs(),
+    })
 }
 
 /// SSE endpoint streaming all agent events to connected clients.
@@ -94,7 +143,6 @@ async fn events_sse(
                 Ok(event) => {
                     if let Ok(json) = serde_json::to_string(&event) {
                         let event_type = match &event {
-                            ApiEvent::ProcessEvent { .. } => "process_event",
                             ApiEvent::InboundMessage { .. } => "inbound_message",
                             ApiEvent::OutboundMessage { .. } => "outbound_message",
                             ApiEvent::TypingState { .. } => "typing_state",
@@ -130,7 +178,7 @@ async fn events_sse(
 }
 
 /// List active channels across all agents.
-async fn list_channels(State(state): State<Arc<ApiState>>) -> Json<serde_json::Value> {
+async fn list_channels(State(state): State<Arc<ApiState>>) -> Json<ChannelsResponse> {
     let pools = state.agent_pools.load();
     let mut all_channels = Vec::new();
 
@@ -139,15 +187,15 @@ async fn list_channels(State(state): State<Arc<ApiState>>) -> Json<serde_json::V
         match store.list_active().await {
             Ok(channels) => {
                 for channel in channels {
-                    all_channels.push(serde_json::json!({
-                        "agent_id": agent_id,
-                        "id": channel.id,
-                        "platform": channel.platform,
-                        "display_name": channel.display_name,
-                        "is_active": channel.is_active,
-                        "last_activity_at": channel.last_activity_at.to_rfc3339(),
-                        "created_at": channel.created_at.to_rfc3339(),
-                    }));
+                    all_channels.push(ChannelResponse {
+                        agent_id: agent_id.clone(),
+                        id: channel.id,
+                        platform: channel.platform,
+                        display_name: channel.display_name,
+                        is_active: channel.is_active,
+                        last_activity_at: channel.last_activity_at.to_rfc3339(),
+                        created_at: channel.created_at.to_rfc3339(),
+                    });
                 }
             }
             Err(error) => {
@@ -156,7 +204,7 @@ async fn list_channels(State(state): State<Arc<ApiState>>) -> Json<serde_json::V
         }
     }
 
-    Json(serde_json::json!({ "channels": all_channels }))
+    Json(ChannelsResponse { channels: all_channels })
 }
 
 #[derive(Deserialize)]
@@ -174,7 +222,7 @@ fn default_message_limit() -> i64 {
 async fn channel_messages(
     State(state): State<Arc<ApiState>>,
     Query(query): Query<MessagesQuery>,
-) -> Json<serde_json::Value> {
+) -> Json<MessagesResponse> {
     let pools = state.agent_pools.load();
     let limit = query.limit.min(100);
 
@@ -182,20 +230,18 @@ async fn channel_messages(
         let logger = ConversationLogger::new(pool.clone());
         match logger.load_channel_transcript(&query.channel_id, limit).await {
             Ok(messages) if !messages.is_empty() => {
-                let result: Vec<serde_json::Value> = messages
+                let result: Vec<MessageResponse> = messages
                     .into_iter()
-                    .map(|message| {
-                        serde_json::json!({
-                            "id": message.id,
-                            "role": message.role,
-                            "sender_name": message.sender_name,
-                            "sender_id": message.sender_id,
-                            "content": message.content,
-                            "created_at": message.created_at.to_rfc3339(),
-                        })
+                    .map(|message| MessageResponse {
+                        id: message.id,
+                        role: message.role,
+                        sender_name: message.sender_name,
+                        sender_id: message.sender_id,
+                        content: message.content,
+                        created_at: message.created_at.to_rfc3339(),
                     })
                     .collect();
-                return Json(serde_json::json!({ "messages": result }));
+                return Json(MessagesResponse { messages: result });
             }
             Ok(_) => continue,
             Err(error) => {
@@ -205,22 +251,31 @@ async fn channel_messages(
         }
     }
 
-    Json(serde_json::json!({ "messages": [] }))
+    Json(MessagesResponse { messages: vec![] })
 }
 
 /// Get live status (active workers, branches, completed items) for all channels.
-async fn channel_status(State(state): State<Arc<ApiState>>) -> Json<serde_json::Value> {
-    let blocks = state.channel_status_blocks.read().await;
-    let mut result = serde_json::Map::new();
+///
+/// Returns the StatusBlock directly -- it already derives Serialize.
+async fn channel_status(
+    State(state): State<Arc<ApiState>>,
+) -> Json<HashMap<String, serde_json::Value>> {
+    // Snapshot the map under the outer lock, then release it so
+    // register/unregister calls aren't blocked during serialization.
+    let snapshot: Vec<_> = {
+        let blocks = state.channel_status_blocks.read().await;
+        blocks.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+    };
 
-    for (channel_id, status_block) in blocks.iter() {
+    let mut result = HashMap::new();
+    for (channel_id, status_block) in snapshot {
         let block = status_block.read().await;
         if let Ok(value) = serde_json::to_value(&*block) {
-            result.insert(channel_id.clone(), value);
+            result.insert(channel_id, value);
         }
     }
 
-    Json(serde_json::Value::Object(result))
+    Json(result)
 }
 
 // -- Static file serving --

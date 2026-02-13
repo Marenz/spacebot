@@ -1,257 +1,162 @@
-# Quick Start
+# Quickstart
 
-Get Spacebot running from scratch.
+Get Spacebot running locally in under 5 minutes.
 
 ## Prerequisites
 
-- Rust toolchain (1.85+, edition 2024)
-- An [OpenRouter](https://openrouter.ai) API key (or Anthropic/OpenAI key directly)
-- Optional: a Discord bot token if you want to connect to Discord
+- **Rust 1.85+** — `rustup update stable`
+- **Bun** (optional, for the web UI) — `curl -fsSL https://bun.sh/install | bash`
+- **An LLM API key** — Anthropic, OpenAI, or OpenRouter
 
-## Build
+## Build from source
 
 ```bash
-git clone <repo-url> && cd spacebot
-cargo build --release
+git clone https://github.com/jamiepine/spacebot.git
+cd spacebot
+
+# Optional: build the web UI (React + Vite, embedded into the binary)
+cd interface && bun install && cd ..
+
+# Install the binary
+cargo install --path .
 ```
 
-The binary is at `target/release/spacebot`.
+The `build.rs` script automatically runs `bun run build` during compilation if `interface/node_modules` exists. Without it, the binary still works — you just get an empty UI on the web dashboard.
 
 ## Configure
 
-Spacebot looks for config at `~/.spacebot/config.toml` (or `$SPACEBOT_DIR/config.toml`). Create the directory and config file:
+Spacebot needs at least one LLM provider key. You can either set an environment variable or create a config file.
+
+### Option A: Environment variable (fastest)
 
 ```bash
-mkdir -p ~/.spacebot
-```
-
-### Minimal config (OpenRouter)
-
-```toml
-[llm]
-openrouter_key = "env:OPENROUTER_API_KEY"
-
-[defaults.routing]
-channel = "openrouter/anthropic/claude-sonnet-4-20250514"
-worker = "openrouter/anthropic/claude-haiku-4.5-20250514"
-
-[[agents]]
-id = "main"
-default = true
-```
-
-### Minimal config (Anthropic direct)
-
-```toml
-[llm]
-anthropic_key = "env:ANTHROPIC_API_KEY"
-
-[defaults.routing]
-channel = "anthropic/claude-sonnet-4-20250514"
-worker = "anthropic/claude-haiku-4.5-20250514"
-
-[[agents]]
-id = "main"
-default = true
-```
-
-Set your API key:
-
-```bash
-# pick one
-export OPENROUTER_API_KEY="sk-or-..."
 export ANTHROPIC_API_KEY="sk-ant-..."
 ```
 
-## LLM Providers
+This is enough. Spacebot will create a default `main` agent with sensible defaults and no messaging adapters. The web UI and HTTP API will be available on `http://localhost:19898`.
 
-Three providers are supported. Model names include the provider as a prefix:
+### Option B: Interactive onboarding
 
-| Provider | Config key | Env var | Example model |
-|----------|-----------|---------|---------------|
-| OpenRouter | `openrouter_key` | `OPENROUTER_API_KEY` | `openrouter/anthropic/claude-sonnet-4-20250514` |
-| Anthropic | `anthropic_key` | `ANTHROPIC_API_KEY` | `anthropic/claude-sonnet-4-20250514` |
-| OpenAI | `openai_key` | `OPENAI_API_KEY` | `openai/gpt-4o` |
+Just run `spacebot` with no config file and no API key env var set. It will walk you through provider selection, API key entry, agent naming, and optional Discord setup.
 
-OpenRouter gives you access to all models through one key. Model names for OpenRouter use the format `openrouter/<provider>/<model>` — the part after `openrouter/` is the model ID as listed on openrouter.ai.
+### Option C: Config file
 
-You can mix providers across process types:
+Create `~/.spacebot/config.toml`:
 
 ```toml
 [llm]
-openrouter_key = "env:OPENROUTER_API_KEY"
-anthropic_key = "env:ANTHROPIC_API_KEY"
+anthropic_key = "sk-ant-..."
+# or: openrouter_key = "sk-or-..."
+# or: openai_key = "sk-..."
+# Keys also support env references: anthropic_key = "env:ANTHROPIC_API_KEY"
 
-[defaults.routing]
-channel = "anthropic/claude-sonnet-4-20250514"
-worker = "openrouter/anthropic/claude-haiku-4.5-20250514"
-```
+[[agents]]
+id = "main"
 
-## Model Routing
-
-Different process types use different models. Channels (user-facing) get the best model. Workers (task execution) can use something cheaper.
-
-```toml
-[defaults.routing]
-channel = "openrouter/anthropic/claude-sonnet-4-20250514"    # user conversations
-branch = "openrouter/anthropic/claude-sonnet-4-20250514"     # thinking forks
-worker = "openrouter/anthropic/claude-haiku-4.5-20250514"    # task execution
-compactor = "openrouter/anthropic/claude-haiku-4.5-20250514" # summarization
-cortex = "openrouter/anthropic/claude-haiku-4.5-20250514"    # system observation
-```
-
-Task-type overrides let specific worker tasks use different models:
-
-```toml
-[defaults.routing.task_overrides]
-coding = "openrouter/anthropic/claude-sonnet-4-20250514"
-deep_reasoning = "openrouter/anthropic/claude-opus-4-20250514"
-```
-
-Fallback chains handle rate limits and outages:
-
-```toml
-[defaults.routing.fallbacks]
-"openrouter/anthropic/claude-sonnet-4-20250514" = ["openrouter/anthropic/claude-haiku-4.5-20250514"]
-```
-
-## Run
-
-```bash
-spacebot
-```
-
-This starts Spacebot as a background daemon. Use `--foreground` to keep it attached to the terminal:
-
-```bash
-spacebot start --foreground
-```
-
-Other commands:
-
-```bash
-spacebot stop               # graceful shutdown
-spacebot restart             # stop + start
-spacebot status              # show pid and uptime
-```
-
-With a specific config path or debug logging:
-
-```bash
-spacebot --config /path/to/config.toml
-spacebot --debug
-spacebot start -f -d        # foreground + debug (useful during development)
-```
-
-See [docs/daemon.md](daemon.md) for details on background operation, logging, and the IPC protocol.
-
-On first run, Spacebot creates the agent directory structure:
-
-```
-~/.spacebot/
-├── config.toml
-├── spacebot.pid              # daemon PID (when running in background)
-├── spacebot.sock             # IPC socket (when running in background)
-├── logs/                     # daemon logs (daily rotation)
-│   └── spacebot.log
-├── agents/
-│   └── main/
-│       ├── workspace/
-│       │   ├── SOUL.md        # personality and values
-│       │   ├── IDENTITY.md    # name and nature
-│       │   └── USER.md        # info about the human
-│       ├── data/
-│       │   ├── spacebot.db    # SQLite (memories, conversations)
-│       │   ├── lancedb/       # vector search + embeddings
-│       │   └── config.redb    # agent settings
-│       └── archives/          # compaction transcripts
-└── prompts/
-    ├── CHANNEL.md
-    ├── BRANCH.md
-    ├── WORKER.md
-    ├── COMPACTOR.md
-    └── CORTEX.md
-```
-
-Edit the identity files in `agents/main/workspace/` to give your agent a personality. These are injected into the system prompt.
-
-## Connect to Discord
-
-See [docs/discord-setup.md](discord-setup.md) for full Discord setup. The short version:
-
-1. Create a bot at https://discord.com/developers/applications
-2. Enable **Message Content Intent** under Privileged Gateway Intents
-3. Invite the bot to your server
-4. Add to your config:
-
-```toml
+# Optional: connect to Discord
 [messaging.discord]
 enabled = true
 token = "env:DISCORD_BOT_TOKEN"
 
+# Route Discord messages to the main agent
 [[bindings]]
 agent_id = "main"
 channel = "discord"
-guild_id = "YOUR_GUILD_ID"
 ```
+
+See [config.md](config.md) for the full config reference.
+
+## Run
 
 ```bash
-export DISCORD_BOT_TOKEN="your-token"
+# Background daemon (default)
+spacebot
+
+# Foreground with debug logging (recommended for first run / development)
+spacebot start -f -d
+
+# During development with cargo
+cargo run -- start -f -d
 ```
 
-## Multiple Agents
+On first launch, Spacebot automatically creates:
 
-Run multiple agents with different identities on a single instance. Each gets isolated memory, conversations, and identity files.
+- `~/.spacebot/` — instance directory
+- `~/.spacebot/agents/main/data/` — SQLite, LanceDB, and redb databases
+- `~/.spacebot/agents/main/workspace/` — identity files and ingest directory
 
-```toml
-[[agents]]
-id = "main"
-default = true
+## Daemon management
 
-[[agents]]
-id = "dev-bot"
-[agents.routing]
-channel = "openrouter/anthropic/claude-sonnet-4-20250514"
-
-# Route different Discord servers to different agents
-[[bindings]]
-agent_id = "main"
-channel = "discord"
-guild_id = "111111111"
-
-[[bindings]]
-agent_id = "dev-bot"
-channel = "discord"
-guild_id = "222222222"
+```bash
+spacebot status    # show pid and uptime
+spacebot stop      # graceful shutdown
+spacebot restart   # stop + start
+spacebot restart -f -d  # restart in foreground with debug
 ```
 
-Per-agent config overrides merge with instance defaults. See [docs/agents.md](agents.md) for the full agent system.
+Logs go to `~/.spacebot/agents/{id}/data/logs/` in daemon mode, or stderr in foreground mode.
 
-## Architecture at a Glance
+## Identity files
 
-Spacebot replaces the monolithic "one LLM thread does everything" model with five specialized process types:
+Each agent has three optional markdown files in its workspace (`~/.spacebot/agents/{id}/workspace/`):
 
-| Process | Role | Blocks the user? |
-|---------|------|-------------------|
-| **Channel** | User-facing conversation. Has personality. Delegates everything. | Never |
-| **Branch** | Fork of channel context that goes off to think. Returns a conclusion. | No |
-| **Worker** | Independent task executor. Gets a job, does the job, reports status. | No |
-| **Compactor** | Monitors context size. Triggers summarization before the channel fills up. | No |
-| **Cortex** | System-level observer. Consolidates memories, manages decay. | No |
+| File          | Purpose                                  |
+| ------------- | ---------------------------------------- |
+| `SOUL.md`     | Personality, values, communication style |
+| `IDENTITY.md` | Name, nature, purpose                    |
+| `USER.md`     | Info about the human the agent talks to  |
 
-The channel is always responsive. It never waits on branches, workers, or compaction. When it needs to think, it forks a branch. When it needs work done, it spawns a worker. When context gets full, the compactor handles it in the background.
+Template files are created on first run. Edit them to shape the agent's personality. Changes are hot-reloaded (no restart needed).
 
-## Current Status
+## Web UI
 
-Spacebot is in active development. The foundation is built (config, databases, memory system, LLM routing, Discord adapter, tools, hooks). The orchestration layer (message routing, channel lifecycle, real LLM calls) is the current focus. See [docs/roadmap.md](roadmap.md) for detailed progress.
+When the API is enabled (default), the web dashboard is served at:
 
-## Reference Docs
+```
+http://localhost:19898
+```
 
-- [docs/roadmap.md](roadmap.md) — build phases and progress
-- [docs/daemon.md](daemon.md) — background operation, logging, IPC
-- [docs/discord-setup.md](discord-setup.md) — Discord bot setup
-- [docs/agents.md](agents.md) — multi-agent system
-- [docs/routing.md](routing.md) — model routing and fallbacks
-- [docs/messaging.md](messaging.md) — messaging adapter architecture
-- [docs/memory.md](memory.md) — memory system design
-- [docs/philosophy.md](philosophy.md) — why Rust
+During development, the Vite dev server runs separately with API proxying:
+
+```bash
+cd interface && bun run dev
+# UI at http://localhost:3000, proxies /api to http://localhost:19898
+```
+
+## Messaging platforms
+
+| Platform | Status    | Setup guide                          |
+| -------- | --------- | ------------------------------------ |
+| Discord  | Supported | [discord-setup.md](discord-setup.md) |
+| Slack    | Supported | [slack-setup.md](slack-setup.md)     |
+| Webhook  | Planned   | —                                    |
+| Telegram | Planned   | —                                    |
+
+No messaging adapters are required. Without them, Spacebot is accessible via the web UI and HTTP API.
+
+## CLI flags reference
+
+```
+spacebot [OPTIONS] [COMMAND]
+
+Commands:
+  start     Start the daemon [default]
+  stop      Stop the running daemon
+  restart   Restart the daemon
+  status    Show daemon status
+
+Global options:
+  -c, --config <PATH>    Path to config file
+  -d, --debug            Enable debug logging
+
+Start/restart options:
+  -f, --foreground       Run in foreground instead of daemonizing
+```
+
+## Next steps
+
+- [Config reference](config.md) — full config.toml documentation
+- [Model routing](routing.md) — per-process model selection and fallbacks
+- [Memory system](memory.md) — how memories are stored and recalled
+- [Agents](agents.md) — multi-agent setup
+- [Cron jobs](cron.md) — scheduled tasks

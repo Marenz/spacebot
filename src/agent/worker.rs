@@ -73,7 +73,7 @@ impl Worker {
     ) -> Self {
         let id = Uuid::new_v4();
         let process_id = ProcessId::Worker(id);
-        let hook = SpacebotHook::new(deps.agent_id.clone(), process_id, ProcessType::Worker, deps.event_tx.clone());
+        let hook = SpacebotHook::new(deps.agent_id.clone(), process_id, ProcessType::Worker, channel_id.clone(), deps.event_tx.clone());
         let (status_tx, status_rx) = watch::channel("starting".to_string());
         
         Self {
@@ -107,7 +107,7 @@ impl Worker {
     ) -> (Self, mpsc::Sender<String>) {
         let id = Uuid::new_v4();
         let process_id = ProcessId::Worker(id);
-        let hook = SpacebotHook::new(deps.agent_id.clone(), process_id, ProcessType::Worker, deps.event_tx.clone());
+        let hook = SpacebotHook::new(deps.agent_id.clone(), process_id, ProcessType::Worker, channel_id.clone(), deps.event_tx.clone());
         let (status_tx, status_rx) = watch::channel("starting".to_string());
         let (input_tx, input_rx) = mpsc::channel(32);
         
@@ -481,7 +481,8 @@ impl Worker {
                                 for c in tr.content.iter() {
                                     if let rig::message::ToolResultContent::Text(t) = c {
                                         let text = if t.text.len() > 2000 {
-                                            format!("{}...[truncated]", &t.text[..2000])
+                                            let end = t.text.floor_char_boundary(2000);
+                                            format!("{}...[truncated]", &t.text[..end])
                                         } else {
                                             t.text.clone()
                                         };
@@ -505,7 +506,8 @@ impl Worker {
                             rig::message::AssistantContent::ToolCall(tc) => {
                                 let args = tc.function.arguments.to_string();
                                 let args_display = if args.len() > 500 {
-                                    format!("{}...[truncated]", &args[..500])
+                                    let end = args.floor_char_boundary(500);
+                                    format!("{}...[truncated]", &args[..end])
                                 } else {
                                     args
                                 };
@@ -586,10 +588,10 @@ impl Worker {
     }
 }
 
-/// Build a brief recap of removed worker history for the compaction marker.
+/// Build a recap of removed worker history for the compaction marker.
 ///
-/// Extracts tool call names and their results (truncated) so the worker
-/// knows what it already did without carrying the full history.
+/// Extracts tool calls, assistant text, and tool results so the worker
+/// retains full context of what it already did after compaction.
 fn build_worker_recap(messages: &[rig::message::Message]) -> String {
     let mut recap = String::new();
     
@@ -598,23 +600,12 @@ fn build_worker_recap(messages: &[rig::message::Message]) -> String {
             rig::message::Message::Assistant { content, .. } => {
                 for item in content.iter() {
                     if let rig::message::AssistantContent::ToolCall(tc) = item {
-                        recap.push_str(&format!("- Called `{}` ", tc.function.name));
-                        // Include truncated args for context
                         let args = tc.function.arguments.to_string();
-                        if args.len() > 100 {
-                            recap.push_str(&format!("({}...)\n", &args[..100]));
-                        } else {
-                            recap.push_str(&format!("({args})\n"));
-                        }
+                        recap.push_str(&format!("- Called `{}` ({args})\n", tc.function.name));
                     }
                     if let rig::message::AssistantContent::Text(t) = item {
                         if !t.text.is_empty() {
-                            let text = if t.text.len() > 200 {
-                                format!("{}...", &t.text[..200])
-                            } else {
-                                t.text.clone()
-                            };
-                            recap.push_str(&format!("- Noted: {text}\n"));
+                            recap.push_str(&format!("- Noted: {}\n", t.text));
                         }
                     }
                 }
@@ -624,12 +615,7 @@ fn build_worker_recap(messages: &[rig::message::Message]) -> String {
                     if let rig::message::UserContent::ToolResult(tr) = item {
                         for c in tr.content.iter() {
                             if let rig::message::ToolResultContent::Text(t) = c {
-                                let result = if t.text.len() > 150 {
-                                    format!("{}...", &t.text[..150])
-                                } else {
-                                    t.text.clone()
-                                };
-                                recap.push_str(&format!("  Result: {result}\n"));
+                                recap.push_str(&format!("  Result: {}\n", t.text));
                             }
                         }
                     }

@@ -93,7 +93,7 @@ impl Channel {
         logs_dir: std::path::PathBuf,
     ) -> (Self, mpsc::Sender<InboundMessage>) {
         let process_id = ProcessId::Channel(id.clone());
-        let hook = SpacebotHook::new(deps.agent_id.clone(), process_id, ProcessType::Channel, deps.event_tx.clone());
+        let hook = SpacebotHook::new(deps.agent_id.clone(), process_id, ProcessType::Channel, Some(id.clone()), deps.event_tx.clone());
         let status_block = Arc::new(RwLock::new(StatusBlock::new()));
         let history = Arc::new(RwLock::new(Vec::new()));
         let active_branches = Arc::new(RwLock::new(HashMap::new()));

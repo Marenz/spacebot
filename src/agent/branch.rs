@@ -44,7 +44,7 @@ impl Branch {
     ) -> Self {
         let id = Uuid::new_v4();
         let process_id = ProcessId::Branch(id);
-        let hook = SpacebotHook::new(deps.agent_id.clone(), process_id, ProcessType::Branch, deps.event_tx.clone());
+        let hook = SpacebotHook::new(deps.agent_id.clone(), process_id, ProcessType::Branch, Some(channel_id.clone()), deps.event_tx.clone());
         
         Self {
             id,

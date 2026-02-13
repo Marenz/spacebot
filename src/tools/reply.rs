@@ -106,7 +106,7 @@ impl Tool for ReplyTool {
             Some(ref name) => {
                 // Cap thread names at 100 characters (Discord limit)
                 let thread_name = if name.len() > 100 {
-                    name[..100].to_string()
+                    name[..name.floor_char_boundary(100)].to_string()
                 } else {
                     name.clone()
                 };

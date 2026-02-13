@@ -84,7 +84,9 @@ impl Tool for SetStatusTool {
         // Cap status length to prevent context bloat in the status block.
         // Status is rendered into every channel turn so it should stay short.
         let status = if args.status.len() > 256 {
-            format!("{}...", &args.status[..args.status[..256].rfind(char::is_whitespace).unwrap_or(256)])
+            let end = args.status.floor_char_boundary(256);
+            let boundary = args.status[..end].rfind(char::is_whitespace).unwrap_or(end);
+            format!("{}...", &args.status[..boundary])
         } else {
             args.status
         };

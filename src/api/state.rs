@@ -23,11 +23,6 @@ pub struct ApiState {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ApiEvent {
-    /// A process event from an agent.
-    ProcessEvent {
-        agent_id: String,
-        event: ProcessEvent,
-    },
     /// An inbound message from a user.
     InboundMessage {
         agent_id: String,
@@ -50,21 +45,21 @@ pub enum ApiEvent {
     /// A worker was started.
     WorkerStarted {
         agent_id: String,
-        channel_id: String,
+        channel_id: Option<String>,
         worker_id: String,
         task: String,
     },
     /// A worker's status changed.
     WorkerStatusUpdate {
         agent_id: String,
-        channel_id: String,
+        channel_id: Option<String>,
         worker_id: String,
         status: String,
     },
     /// A worker completed.
     WorkerCompleted {
         agent_id: String,
-        channel_id: String,
+        channel_id: Option<String>,
         worker_id: String,
         result: String,
     },
@@ -85,7 +80,7 @@ pub enum ApiEvent {
     /// A tool call started on a process.
     ToolStarted {
         agent_id: String,
-        channel_id: String,
+        channel_id: Option<String>,
         process_type: String,
         process_id: String,
         tool_name: String,
@@ -93,7 +88,7 @@ pub enum ApiEvent {
     /// A tool call completed on a process.
     ToolCompleted {
         agent_id: String,
-        channel_id: String,
+        channel_id: Option<String>,
         process_type: String,
         process_id: String,
         tool_name: String,
@@ -148,7 +143,7 @@ impl ApiState {
                             ProcessEvent::WorkerStarted { worker_id, channel_id, task, .. } => {
                                 api_tx.send(ApiEvent::WorkerStarted {
                                     agent_id: agent_id.clone(),
-                                    channel_id: channel_id.as_deref().unwrap_or("").to_string(),
+                                    channel_id: channel_id.as_deref().map(|s| s.to_string()),
                                     worker_id: worker_id.to_string(),
                                     task: task.clone(),
                                 }).ok();
@@ -164,7 +159,7 @@ impl ApiState {
                             ProcessEvent::WorkerStatus { worker_id, channel_id, status, .. } => {
                                 api_tx.send(ApiEvent::WorkerStatusUpdate {
                                     agent_id: agent_id.clone(),
-                                    channel_id: channel_id.as_deref().unwrap_or("").to_string(),
+                                    channel_id: channel_id.as_deref().map(|s| s.to_string()),
                                     worker_id: worker_id.to_string(),
                                     status: status.clone(),
                                 }).ok();
@@ -172,7 +167,7 @@ impl ApiState {
                             ProcessEvent::WorkerComplete { worker_id, channel_id, result, .. } => {
                                 api_tx.send(ApiEvent::WorkerCompleted {
                                     agent_id: agent_id.clone(),
-                                    channel_id: channel_id.as_deref().unwrap_or("").to_string(),
+                                    channel_id: channel_id.as_deref().map(|s| s.to_string()),
                                     worker_id: worker_id.to_string(),
                                     result: result.clone(),
                                 }).ok();
@@ -185,21 +180,21 @@ impl ApiState {
                                     conclusion: conclusion.clone(),
                                 }).ok();
                             }
-                            ProcessEvent::ToolStarted { process_id, tool_name, .. } => {
-                                let (process_type, id_str, channel_id) = process_id_info(process_id);
+                            ProcessEvent::ToolStarted { process_id, channel_id, tool_name, .. } => {
+                                let (process_type, id_str) = process_id_info(process_id);
                                 api_tx.send(ApiEvent::ToolStarted {
                                     agent_id: agent_id.clone(),
-                                    channel_id,
+                                    channel_id: channel_id.as_deref().map(|s| s.to_string()),
                                     process_type,
                                     process_id: id_str,
                                     tool_name: tool_name.clone(),
                                 }).ok();
                             }
-                            ProcessEvent::ToolCompleted { process_id, tool_name, .. } => {
-                                let (process_type, id_str, channel_id) = process_id_info(process_id);
+                            ProcessEvent::ToolCompleted { process_id, channel_id, tool_name, .. } => {
+                                let (process_type, id_str) = process_id_info(process_id);
                                 api_tx.send(ApiEvent::ToolCompleted {
                                     agent_id: agent_id.clone(),
-                                    channel_id,
+                                    channel_id: channel_id.as_deref().map(|s| s.to_string()),
                                     process_type,
                                     process_id: id_str,
                                     tool_name: tool_name.clone(),
@@ -207,12 +202,6 @@ impl ApiState {
                             }
                             _ => {}
                         }
-
-                        // Also send the raw event for anything the frontend wants
-                        api_tx.send(ApiEvent::ProcessEvent {
-                            agent_id: agent_id.clone(),
-                            event,
-                        }).ok();
                     }
                     Err(broadcast::error::RecvError::Lagged(count)) => {
                         tracing::debug!(agent_id = %agent_id, count, "API event forwarder lagged, skipped events");
@@ -229,17 +218,11 @@ impl ApiState {
     }
 }
 
-/// Extract (process_type, id_string, channel_id) from a ProcessId.
-fn process_id_info(id: &ProcessId) -> (String, String, String) {
+/// Extract (process_type, id_string) from a ProcessId.
+fn process_id_info(id: &ProcessId) -> (String, String) {
     match id {
-        ProcessId::Channel(channel_id) => {
-            ("channel".into(), channel_id.to_string(), channel_id.to_string())
-        }
-        ProcessId::Branch(branch_id) => {
-            ("branch".into(), branch_id.to_string(), String::new())
-        }
-        ProcessId::Worker(worker_id) => {
-            ("worker".into(), worker_id.to_string(), String::new())
-        }
+        ProcessId::Channel(channel_id) => ("channel".into(), channel_id.to_string()),
+        ProcessId::Branch(branch_id) => ("branch".into(), branch_id.to_string()),
+        ProcessId::Worker(worker_id) => ("worker".into(), worker_id.to_string()),
     }
 }

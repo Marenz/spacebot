@@ -117,11 +117,13 @@ pub enum ProcessEvent {
     ToolStarted {
         agent_id: AgentId,
         process_id: ProcessId,
+        channel_id: Option<ChannelId>,
         tool_name: String,
     },
     ToolCompleted {
         agent_id: AgentId,
         process_id: ProcessId,
+        channel_id: Option<ChannelId>,
         tool_name: String,
         result: String,
     },

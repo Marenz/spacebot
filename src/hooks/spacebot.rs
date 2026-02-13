@@ -1,6 +1,6 @@
 //! SpacebotHook: Prompt hook for channels, branches, and workers.
 
-use crate::{AgentId, ProcessEvent, ProcessId, ProcessType};
+use crate::{AgentId, ChannelId, ProcessEvent, ProcessId, ProcessType};
 use rig::agent::{HookAction, PromptHook, ToolCallHookAction};
 use rig::completion::{CompletionModel, CompletionResponse, Message};
 use tokio::sync::broadcast;
@@ -11,7 +11,8 @@ pub struct SpacebotHook {
     agent_id: AgentId,
     process_id: ProcessId,
     process_type: ProcessType,
-        event_tx: broadcast::Sender<ProcessEvent>,
+    channel_id: Option<ChannelId>,
+    event_tx: broadcast::Sender<ProcessEvent>,
 }
 
 impl SpacebotHook {
@@ -20,12 +21,14 @@ impl SpacebotHook {
         agent_id: AgentId,
         process_id: ProcessId,
         process_type: ProcessType,
-    event_tx: broadcast::Sender<ProcessEvent>,
+        channel_id: Option<ChannelId>,
+        event_tx: broadcast::Sender<ProcessEvent>,
     ) -> Self {
         Self {
             agent_id,
             process_id,
             process_type,
+            channel_id,
             event_tx,
         }
     }
@@ -111,6 +114,7 @@ where
         let event = ProcessEvent::ToolStarted {
             agent_id: self.agent_id.clone(),
             process_id: self.process_id.clone(),
+            channel_id: self.channel_id.clone(),
             tool_name: tool_name.to_string(),
         };
         let _ = self.event_tx.send(event);
@@ -152,6 +156,7 @@ where
         let event = ProcessEvent::ToolCompleted {
             agent_id: self.agent_id.clone(),
             process_id: self.process_id.clone(),
+            channel_id: self.channel_id.clone(),
             tool_name: tool_name.to_string(),
             result: capped_result,
         };

@@ -7,7 +7,7 @@ function alpha(variableName: string) {
 
 export default {
 	content: ["./index.html", "./src/**/*.{ts,tsx}"],
-	darkMode: "class",
+
 	theme: {
 		screens: {
 			xs: "475px",
@@ -103,10 +103,6 @@ export default {
 		},
 	},
 	plugins: [
-		require("@tailwindcss/forms"),
 		require("tailwindcss-animate"),
-		require("@headlessui/tailwindcss"),
-		require("tailwindcss-radix")(),
-		require("@tailwindcss/typography"),
 	],
 } satisfies Config;

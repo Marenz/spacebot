@@ -206,7 +206,8 @@ impl Messaging for DiscordAdapter {
                 let active = self.active_messages.read().await;
                 if let Some(&message_id) = active.get(&message.id) {
                     let display_text = if text.len() > 2000 {
-                        format!("{}...", &text[..1997])
+                        let end = text.floor_char_boundary(1997);
+                        format!("{}...", &text[..end])
                     } else {
                         text
                     };

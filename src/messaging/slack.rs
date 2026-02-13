@@ -368,7 +368,8 @@ impl Messaging for SlackAdapter {
                 let active = self.active_messages.read().await;
                 if let Some(ts) = active.get(&message.id) {
                     let display_text = if text.len() > 4000 {
-                        format!("{}...", &text[..3997])
+                        let end = text.floor_char_boundary(3997);
+                        format!("{}...", &text[..end])
                     } else {
                         text
                     };

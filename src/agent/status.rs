@@ -192,7 +192,8 @@ impl StatusBlock {
                 };
                 // Truncate long results to keep the status block manageable
                 let summary = if item.result_summary.len() > 500 {
-                    format!("{}...", &item.result_summary[..500])
+                    let end = item.result_summary.floor_char_boundary(500);
+                    format!("{}...", &item.result_summary[..end])
                 } else {
                     item.result_summary.clone()
                 };

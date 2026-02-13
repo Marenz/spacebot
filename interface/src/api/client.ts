@@ -20,6 +20,8 @@ export interface ChannelsResponse {
 	channels: ChannelInfo[];
 }
 
+export type ProcessType = "channel" | "branch" | "worker";
+
 export interface InboundMessageEvent {
 	type: "inbound_message";
 	agent_id: string;
@@ -42,19 +44,10 @@ export interface TypingStateEvent {
 	is_typing: boolean;
 }
 
-export interface ProcessEventWrapper {
-	type: "process_event";
-	agent_id: string;
-	event: {
-		type: string;
-		[key: string]: unknown;
-	};
-}
-
 export interface WorkerStartedEvent {
 	type: "worker_started";
 	agent_id: string;
-	channel_id: string;
+	channel_id: string | null;
 	worker_id: string;
 	task: string;
 }
@@ -62,7 +55,7 @@ export interface WorkerStartedEvent {
 export interface WorkerStatusEvent {
 	type: "worker_status";
 	agent_id: string;
-	channel_id: string;
+	channel_id: string | null;
 	worker_id: string;
 	status: string;
 }
@@ -70,7 +63,7 @@ export interface WorkerStatusEvent {
 export interface WorkerCompletedEvent {
 	type: "worker_completed";
 	agent_id: string;
-	channel_id: string;
+	channel_id: string | null;
 	worker_id: string;
 	result: string;
 }
@@ -94,8 +87,8 @@ export interface BranchCompletedEvent {
 export interface ToolStartedEvent {
 	type: "tool_started";
 	agent_id: string;
-	channel_id: string;
-	process_type: string;
+	channel_id: string | null;
+	process_type: ProcessType;
 	process_id: string;
 	tool_name: string;
 }
@@ -103,8 +96,8 @@ export interface ToolStartedEvent {
 export interface ToolCompletedEvent {
 	type: "tool_completed";
 	agent_id: string;
-	channel_id: string;
-	process_type: string;
+	channel_id: string | null;
+	process_type: ProcessType;
 	process_id: string;
 	tool_name: string;
 }
@@ -119,8 +112,7 @@ export type ApiEvent =
 	| BranchStartedEvent
 	| BranchCompletedEvent
 	| ToolStartedEvent
-	| ToolCompletedEvent
-	| ProcessEventWrapper;
+	| ToolCompletedEvent;
 
 async function fetchJson<T>(path: string): Promise<T> {
 	const response = await fetch(`${API_BASE}${path}`);

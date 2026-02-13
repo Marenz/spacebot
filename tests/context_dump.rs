@@ -53,14 +53,9 @@ async fn bootstrap_deps() -> anyhow::Result<(spacebot::AgentDeps, spacebot::conf
         embedding_model,
     ));
 
-    let shared_prompts_dir = config.prompts_dir();
     let identity = spacebot::identity::Identity::load(&agent_config.workspace).await;
-    let prompts = spacebot::identity::Prompts::load(
-        &agent_config.workspace,
-        &shared_prompts_dir,
-    )
-    .await
-    .context("failed to load prompts")?;
+    let prompts = spacebot::prompts::PromptEngine::new("en")
+        .context("failed to init prompt engine")?;
     let skills = spacebot::skills::SkillSet::load(
         &config.skills_dir(),
         &agent_config.skills_dir(),
@@ -124,58 +119,34 @@ fn format_tool_defs(defs: &[rig::completion::ToolDefinition]) -> String {
 
 /// Build the channel system prompt (mirrors Channel::build_system_prompt).
 fn build_channel_system_prompt(rc: &spacebot::config::RuntimeConfig) -> String {
+    let prompt_engine = rc.prompts.load();
     let identity_context = rc.identity.load().render();
-    let channel_prompt = rc.prompts.load().channel.clone();
-    let skills = rc.skills.load();
-
-    let mut prompt = String::new();
-
-    if !identity_context.is_empty() {
-        prompt.push_str(&identity_context);
-        prompt.push_str("\n\n");
-    }
-
     let memory_bulletin = rc.memory_bulletin.load();
-    if !memory_bulletin.is_empty() {
-        prompt.push_str("## Memory Context\n\n");
-        prompt.push_str(&memory_bulletin);
-        prompt.push_str("\n\n");
-    }
+    let skills = rc.skills.load();
+    let skills_prompt = skills.render_channel_prompt(&prompt_engine);
 
-    prompt.push_str(&channel_prompt);
-
-    let skills_prompt = skills.render_channel_prompt();
-    if !skills_prompt.is_empty() {
-        prompt.push_str("\n\n");
-        prompt.push_str(&skills_prompt);
-    }
-
-    // Worker capabilities
     let browser_enabled = rc.browser_config.load().enabled;
     let web_search_enabled = rc.brave_search_key.load().is_some();
+    let worker_capabilities = prompt_engine
+        .render_worker_capabilities(browser_enabled, web_search_enabled)
+        .expect("failed to render worker capabilities");
 
-    prompt.push_str("\n\n## Worker Capabilities\n\n");
-    prompt.push_str("When you spawn a worker, it has access to the following tools:\n\n");
-    prompt.push_str("- **shell** — run shell commands\n");
-    prompt.push_str("- **file** — read, write, search, and list files\n");
-    prompt.push_str("- **exec** — run subprocesses with environment control\n");
-    prompt.push_str("- **set_status** — update worker status visible in your status block\n");
-    if browser_enabled {
-        prompt.push_str("- **browser** — browse web pages, take screenshots, click elements, fill forms\n");
-    }
-    if web_search_enabled {
-        prompt.push_str("- **web_search** — search the web via Brave Search API\n");
-    }
-    prompt.push_str("\nWorkers do NOT have conversation context or memory access. Include all necessary context in the task description.");
+    let conversation_context = prompt_engine
+        .render_conversation_context("discord", Some("Test Server"), Some("#general"))
+        .ok();
 
-    // Simulated conversation context
-    prompt.push_str("\n\n## Conversation Context\n\n");
-    prompt.push_str("Platform: discord\n");
-    prompt.push_str("Server: Test Server\n");
-    prompt.push_str("Channel: #general\n");
-    prompt.push_str("Multiple users may be present. Each message is prefixed with [username].");
+    let empty_to_none = |s: String| if s.is_empty() { None } else { Some(s) };
 
-    prompt
+    prompt_engine
+        .render_channel_prompt(
+            empty_to_none(identity_context),
+            empty_to_none(memory_bulletin.to_string()),
+            empty_to_none(skills_prompt),
+            worker_capabilities,
+            conversation_context,
+            None,
+        )
+        .expect("failed to render channel prompt")
 }
 
 // ─── Channel Context ─────────────────────────────────────────────────────────
@@ -254,7 +225,12 @@ async fn dump_branch_context() {
     let (deps, _config) = bootstrap_deps().await.expect("failed to bootstrap");
     let rc = &deps.runtime_config;
 
-    let branch_prompt = rc.prompts.load().branch.clone();
+    let prompt_engine = rc.prompts.load();
+    let instance_dir = rc.instance_dir.to_string_lossy();
+    let workspace_dir = rc.workspace_dir.to_string_lossy();
+    let branch_prompt = prompt_engine
+        .render_branch_prompt(&instance_dir, &workspace_dir)
+        .expect("failed to render branch prompt");
     print_section("BRANCH SYSTEM PROMPT", &branch_prompt);
     print_stats("System prompt", &branch_prompt);
 
@@ -298,7 +274,12 @@ async fn dump_worker_context() {
     let (deps, _config) = bootstrap_deps().await.expect("failed to bootstrap");
     let rc = &deps.runtime_config;
 
-    let worker_prompt = rc.prompts.load().worker.clone();
+    let prompt_engine = rc.prompts.load();
+    let instance_dir = rc.instance_dir.to_string_lossy();
+    let workspace_dir = rc.workspace_dir.to_string_lossy();
+    let worker_prompt = prompt_engine
+        .render_worker_prompt(&instance_dir, &workspace_dir)
+        .expect("failed to render worker prompt");
     print_section("WORKER SYSTEM PROMPT", &worker_prompt);
     print_stats("System prompt", &worker_prompt);
 
@@ -351,7 +332,9 @@ async fn dump_worker_context() {
 async fn dump_all_contexts() {
     let (deps, _config) = bootstrap_deps().await.expect("failed to bootstrap");
     let rc = &deps.runtime_config;
-    let prompts = rc.prompts.load();
+    let prompt_engine = rc.prompts.load();
+    let instance_dir = rc.instance_dir.to_string_lossy();
+    let workspace_dir = rc.workspace_dir.to_string_lossy();
 
     // Generate bulletin so channel context is complete
     let bulletin_success = spacebot::agent::cortex::generate_bulletin(&deps).await;
@@ -399,6 +382,9 @@ async fn dump_all_contexts() {
     println!("--- TOTAL CHANNEL: ~{} tokens ---", channel_total / 4);
 
     // ── Branch ──
+    let branch_prompt = prompt_engine
+        .render_branch_prompt(&instance_dir, &workspace_dir)
+        .expect("failed to render branch prompt");
     let branch_tool_server = spacebot::tools::create_branch_tool_server(
         deps.memory_search.clone(),
         conversation_logger,
@@ -407,14 +393,17 @@ async fn dump_all_contexts() {
     let branch_tool_defs = branch_tool_server.get_tool_defs(None).await.unwrap();
     let branch_tools_text = format_tool_defs(&branch_tool_defs);
 
-    print_section("BRANCH SYSTEM PROMPT", &prompts.branch);
-    print_stats("System prompt", &prompts.branch);
+    print_section("BRANCH SYSTEM PROMPT", &branch_prompt);
+    print_stats("System prompt", &branch_prompt);
     print_section(&format!("BRANCH TOOLS ({} tools)", branch_tool_defs.len()), &branch_tools_text);
     print_stats("Tool definitions", &branch_tools_text);
-    let branch_total = prompts.branch.len() + branch_tools_text.len();
+    let branch_total = branch_prompt.len() + branch_tools_text.len();
     println!("--- TOTAL BRANCH: ~{} tokens ---", branch_total / 4);
 
     // ── Worker ──
+    let worker_prompt = prompt_engine
+        .render_worker_prompt(&instance_dir, &workspace_dir)
+        .expect("failed to render worker prompt");
     let browser_config = (**rc.browser_config.load()).clone();
     let brave_search_key = (**rc.brave_search_key.load()).clone();
     let worker_tool_server = spacebot::tools::create_worker_tool_server(
@@ -429,11 +418,11 @@ async fn dump_all_contexts() {
     let worker_tool_defs = worker_tool_server.get_tool_defs(None).await.unwrap();
     let worker_tools_text = format_tool_defs(&worker_tool_defs);
 
-    print_section("WORKER SYSTEM PROMPT", &prompts.worker);
-    print_stats("System prompt", &prompts.worker);
+    print_section("WORKER SYSTEM PROMPT", &worker_prompt);
+    print_stats("System prompt", &worker_prompt);
     print_section(&format!("WORKER TOOLS ({} tools)", worker_tool_defs.len()), &worker_tools_text);
     print_stats("Tool definitions", &worker_tools_text);
-    let worker_total = prompts.worker.len() + worker_tools_text.len();
+    let worker_total = worker_prompt.len() + worker_tools_text.len();
     println!("--- TOTAL WORKER: ~{} tokens ---", worker_total / 4);
 
     // ── Summary ──
@@ -451,9 +440,9 @@ async fn dump_all_contexts() {
     println!("  Channel: ~{} tokens (prompt: ~{}, tools: ~{})",
         channel_total / 4, channel_prompt.len() / 4, channel_tools_text.len() / 4);
     println!("  Branch:  ~{} tokens (prompt: ~{}, tools: ~{}) + cloned channel history",
-        branch_total / 4, prompts.branch.len() / 4, branch_tools_text.len() / 4);
+        branch_total / 4, branch_prompt.len() / 4, branch_tools_text.len() / 4);
     println!("  Worker:  ~{} tokens (prompt: ~{}, tools: ~{})",
-        worker_total / 4, prompts.worker.len() / 4, worker_tools_text.len() / 4);
+        worker_total / 4, worker_prompt.len() / 4, worker_tools_text.len() / 4);
 
     let context_window = **rc.context_window.load();
     println!("\nContext window: {} tokens", context_window);
