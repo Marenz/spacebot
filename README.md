@@ -297,7 +297,7 @@ Read the full vision in [docs/spacedrive.md](docs/spacedrive.md).
 ### Prerequisites
 
 - **Rust** 1.85+ ([rustup](https://rustup.rs/))
-- An LLM API key (OpenRouter, Anthropic, OpenAI, etc.)
+- An LLM API key (OpenRouter, Anthropic, OpenAI, Z.ai, etc.)
 
 ### Build and Run
 
