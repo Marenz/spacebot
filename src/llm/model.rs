@@ -311,13 +311,27 @@ impl SpacebotModel {
             body["tools"] = serde_json::json!(tools);
         }
 
-        let response = self
+        // Detect OAuth setup-tokens (sk-ant-oat...) vs regular API keys.
+        // OAuth tokens require Bearer auth + Claude Code beta headers instead of x-api-key.
+        let is_oauth = api_key.contains("sk-ant-oat");
+        let claude_code_version = "0.2.116";
+        let mut req = self
             .llm_manager
             .http_client()
             .post("https://api.anthropic.com/v1/messages")
-            .header("x-api-key", &api_key)
             .header("anthropic-version", "2023-06-01")
-            .header("content-type", "application/json")
+            .header("content-type", "application/json");
+        if is_oauth {
+            req = req
+                .header("Authorization", format!("Bearer {}", &api_key))
+                .header("anthropic-beta", "claude-code-20250219,oauth-2025-04-20")
+                .header("anthropic-dangerous-direct-browser-access", "true")
+                .header("user-agent", format!("claude-cli/{} (external, cli)", claude_code_version))
+                .header("x-app", "cli");
+        } else {
+            req = req.header("x-api-key", &api_key);
+        }
+        let response = req
             .json(&body)
             .send()
             .await
