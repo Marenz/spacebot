@@ -190,6 +190,31 @@ impl Messaging for TelegramAdapter {
                             }
 
                             let content = build_content(&message, &text);
+
+                            // Resolve Telegram file_ids to download URLs
+                            let content = match content {
+                                MessageContent::Media { text: t, attachments } => {
+                                    let mut resolved = Vec::with_capacity(attachments.len());
+                                    for mut att in attachments {
+                                        // att.url is a Telegram file_id; resolve to download URL
+                                        match bot.get_file(teloxide::types::FileId(att.url.clone())).send().await {
+                                            Ok(file) => {
+                                                att.url = format!(
+                                                    "https://api.telegram.org/file/bot{}/{}",
+                                                    bot.token(), file.path
+                                                );
+                                            }
+                                            Err(error) => {
+                                                tracing::warn!(%error, filename = %att.filename, "failed to resolve Telegram file URL");
+                                            }
+                                        }
+                                        resolved.push(att);
+                                    }
+                                    MessageContent::Media { text: t, attachments: resolved }
+                                }
+                                other => other,
+                            };
+
                             let conversation_id = format!("telegram:{chat_id}");
                             let sender_id = message
                                 .from
