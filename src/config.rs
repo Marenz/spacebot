@@ -121,6 +121,8 @@ pub struct LlmConfig {
     pub opencode_zen_key: Option<String>,
     pub opencode_zen_base_url: Option<String>,
     pub nvidia_key: Option<String>,
+    pub minimax_key: Option<String>,
+    pub minimax_base_url: Option<String>,
 }
 
 impl LlmConfig {
@@ -140,6 +142,7 @@ impl LlmConfig {
             || self.ollama_base_url.is_some()
             || self.opencode_zen_key.is_some()
             || self.nvidia_key.is_some()
+            || self.minimax_key.is_some()
     }
 }
 
@@ -996,6 +999,8 @@ struct TomlLlmConfig {
     opencode_zen_key: Option<String>,
     opencode_zen_base_url: Option<String>,
     nvidia_key: Option<String>,
+    minimax_key: Option<String>,
+    minimax_base_url: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -1367,6 +1372,8 @@ impl Config {
             opencode_zen_key: std::env::var("OPENCODE_ZEN_API_KEY").ok(),
             opencode_zen_base_url: std::env::var("OPENCODE_ZEN_BASE_URL").ok(),
             nvidia_key: std::env::var("NVIDIA_API_KEY").ok(),
+            minimax_key: std::env::var("MINIMAX_API_KEY").ok(),
+            minimax_base_url: std::env::var("MINIMAX_BASE_URL").ok(),
         };
 
         // Note: We allow boot without provider configuration now. System starts in setup mode.
@@ -1561,6 +1568,16 @@ impl Config {
                 .as_deref()
                 .and_then(resolve_env_value)
                 .or_else(|| std::env::var("NVIDIA_API_KEY").ok()),
+            minimax_key: toml
+                .llm
+                .minimax_key
+                .as_deref()
+                .and_then(resolve_env_value)
+                .or_else(|| std::env::var("MINIMAX_API_KEY").ok()),
+            minimax_base_url: toml.llm.minimax_base_url
+                .as_deref()
+                .and_then(resolve_env_value)
+                .or_else(|| std::env::var("MINIMAX_BASE_URL").ok()),
         };
 
         // Note: We allow boot without provider configuration now. System starts in setup mode.
@@ -2536,6 +2553,7 @@ pub fn run_onboarding() -> anyhow::Result<Option<PathBuf>> {
         "Mistral AI",
         "Ollama",
         "OpenCode Zen",
+        "MiniMax",
     ];
     let provider_idx = Select::new()
         .with_prompt("Which LLM provider do you want to use?")
@@ -2556,6 +2574,7 @@ pub fn run_onboarding() -> anyhow::Result<Option<PathBuf>> {
         9 => ("Mistral AI API key", "mistral_key", "mistral"),
         10 => ("Ollama base URL", "ollama_base_url", "ollama"),
         11 => ("OpenCode Zen API key", "opencode_zen_key", "opencode-zen"),
+        12 => ("MiniMax API key", "minimax_key", "minimax"),
         _ => unreachable!(),
     };
     let is_secret = provider_id != "ollama";

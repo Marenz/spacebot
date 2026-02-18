@@ -166,6 +166,13 @@ const PROVIDERS = [
 		placeholder: "http://localhost:11434",
 		envVar: "OLLAMA_BASE_URL",
 	},
+	{
+		id: "minimax",
+		name: "MiniMax",
+		description: "MiniMax M1 (Anthropic message format)",
+		placeholder: "eyJ...",
+		envVar: "MINIMAX_API_KEY",
+	},
 ] as const;
 
 // Endpoint presets for providers that support alternate base URLs.

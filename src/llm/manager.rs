@@ -24,6 +24,7 @@ const DEFAULT_DEEPSEEK_BASE_URL: &str = "https://api.deepseek.com/v1/chat/comple
 const DEFAULT_XAI_BASE_URL: &str = "https://api.x.ai/v1/chat/completions";
 const DEFAULT_MISTRAL_BASE_URL: &str = "https://api.mistral.ai/v1/chat/completions";
 const DEFAULT_OPENCODE_ZEN_BASE_URL: &str = "https://opencode.ai/zen/v1/chat/completions";
+const DEFAULT_MINIMAX_BASE_URL: &str = "https://api.minimax.io/anthropic/v1/messages";
 
 /// Manages LLM provider clients and tracks rate limit state.
 pub struct LlmManager {
@@ -77,6 +78,8 @@ impl LlmManager {
                 .ok_or_else(|| LlmError::MissingProviderKey("opencode-zen".into()).into()),
             "nvidia" => self.config.nvidia_key.clone()
                 .ok_or_else(|| LlmError::MissingProviderKey("nvidia".into()).into()),
+            "minimax" => self.config.minimax_key.clone()
+                .ok_or_else(|| LlmError::MissingProviderKey("minimax".into()).into()),
             _ => Err(LlmError::UnknownProvider(provider.into()).into()),
         }
     }
@@ -114,6 +117,8 @@ impl LlmManager {
                 .unwrap_or(DEFAULT_MISTRAL_BASE_URL),
             "opencode-zen" => self.config.opencode_zen_base_url.as_deref()
                 .unwrap_or(DEFAULT_OPENCODE_ZEN_BASE_URL),
+            "minimax" => self.config.minimax_base_url.as_deref()
+                .unwrap_or(DEFAULT_MINIMAX_BASE_URL),
             _ => unreachable!("unknown provider: {provider}"),
         }
     }

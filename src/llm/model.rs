@@ -129,6 +129,11 @@ impl SpacebotModel {
                     "https://integrate.api.nvidia.com/v1/chat/completions",
                 ).await
             }
+            // MiniMax exposes an Anthropic-compatible messages endpoint.
+            "minimax" => {
+                let url = self.llm_manager.get_base_url("minimax");
+                self.call_anthropic_compatible(request, "minimax", "MiniMax", url).await
+            }
             other => Err(CompletionError::ProviderError(format!(
                 "unknown provider: {other}"
             ))),
