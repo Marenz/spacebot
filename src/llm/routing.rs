@@ -25,6 +25,12 @@ pub struct RoutingConfig {
 
     /// How long to deprioritize a rate-limited model (seconds).
     pub rate_limit_cooldown_secs: u64,
+
+    pub channel_thinking_effort: String,
+    pub branch_thinking_effort: String,
+    pub worker_thinking_effort: String,
+    pub compactor_thinking_effort: String,
+    pub cortex_thinking_effort: String,
 }
 
 impl Default for RoutingConfig {
@@ -45,6 +51,11 @@ impl RoutingConfig {
             task_overrides: HashMap::new(),
             fallbacks: HashMap::new(),
             rate_limit_cooldown_secs: 60,
+            channel_thinking_effort: "auto".into(),
+            branch_thinking_effort: "auto".into(),
+            worker_thinking_effort: "auto".into(),
+            compactor_thinking_effort: "auto".into(),
+            cortex_thinking_effort: "auto".into(),
         }
     }
 }
@@ -68,6 +79,25 @@ impl RoutingConfig {
             ProcessType::Compactor => &self.compactor,
             ProcessType::Cortex => &self.cortex,
         }
+    }
+
+    pub fn thinking_effort_for_model(&self, model_name: &str) -> &str {
+        if self.channel == model_name {
+            return &self.channel_thinking_effort;
+        }
+        if self.branch == model_name {
+            return &self.branch_thinking_effort;
+        }
+        if self.worker == model_name {
+            return &self.worker_thinking_effort;
+        }
+        if self.compactor == model_name {
+            return &self.compactor_thinking_effort;
+        }
+        if self.cortex == model_name {
+            return &self.cortex_thinking_effort;
+        }
+        "auto"
     }
 
     /// Get the fallback chain for a model, if any.
@@ -128,7 +158,19 @@ pub fn defaults_for_provider(provider: &str) -> RoutingConfig {
     match provider {
         "anthropic" => RoutingConfig::for_model("anthropic/claude-sonnet-4-20250514".into()),
         "openrouter" => {
-            RoutingConfig::for_model("openrouter/anthropic/claude-sonnet-4-20250514".into())
+            let channel: String = "openrouter/anthropic/claude-sonnet-4-20250514".into();
+            let worker: String = "openrouter/anthropic/claude-haiku-4.5-20250514".into();
+            RoutingConfig {
+                channel: "openrouter/anthropic/claude-sonnet-4-20250514".into(),
+                branch: "openrouter/anthropic/claude-sonnet-4-20250514".into(),
+                worker: "openrouter/anthropic/claude-haiku-4.5-20250514".into(),
+                compactor: "openrouter/anthropic/claude-haiku-4.5-20250514".into(),
+                cortex: "openrouter/anthropic/claude-haiku-4.5-20250514".into(),
+                task_overrides: HashMap::from([("coding".into(), channel.clone())]),
+                fallbacks: HashMap::from([(channel, vec![worker])]),
+                rate_limit_cooldown_secs: 60,
+                ..RoutingConfig::default()
+            }
         }
         "openai" => {
             let channel: String = "openai/gpt-4.1".into();
@@ -142,6 +184,7 @@ pub fn defaults_for_provider(provider: &str) -> RoutingConfig {
                 task_overrides: HashMap::from([("coding".into(), channel.clone())]),
                 fallbacks: HashMap::from([(channel, vec![worker])]),
                 rate_limit_cooldown_secs: 60,
+                ..RoutingConfig::default()
             }
         }
         "zhipu" => {
@@ -156,6 +199,7 @@ pub fn defaults_for_provider(provider: &str) -> RoutingConfig {
                 task_overrides: HashMap::from([("coding".into(), channel.clone())]),
                 fallbacks: HashMap::from([(channel, vec![worker])]),
                 rate_limit_cooldown_secs: 60,
+                ..RoutingConfig::default()
             }
         }
         "groq" => {
@@ -170,6 +214,7 @@ pub fn defaults_for_provider(provider: &str) -> RoutingConfig {
                 task_overrides: HashMap::from([("coding".into(), channel.clone())]),
                 fallbacks: HashMap::from([(channel, vec![worker])]),
                 rate_limit_cooldown_secs: 60,
+                ..RoutingConfig::default()
             }
         }
         "together" => {
@@ -184,6 +229,7 @@ pub fn defaults_for_provider(provider: &str) -> RoutingConfig {
                 task_overrides: HashMap::from([("coding".into(), channel.clone())]),
                 fallbacks: HashMap::from([(channel, vec![worker])]),
                 rate_limit_cooldown_secs: 60,
+                ..RoutingConfig::default()
             }
         }
         "fireworks" => {
@@ -200,6 +246,7 @@ pub fn defaults_for_provider(provider: &str) -> RoutingConfig {
                 task_overrides: HashMap::from([("coding".into(), channel.clone())]),
                 fallbacks: HashMap::from([(channel, vec![worker])]),
                 rate_limit_cooldown_secs: 60,
+                ..RoutingConfig::default()
             }
         }
         "deepseek" => {
@@ -214,6 +261,7 @@ pub fn defaults_for_provider(provider: &str) -> RoutingConfig {
                 task_overrides: HashMap::from([("coding".into(), channel.clone())]),
                 fallbacks: HashMap::new(),
                 rate_limit_cooldown_secs: 60,
+                ..RoutingConfig::default()
             }
         }
         "xai" => {
@@ -228,6 +276,7 @@ pub fn defaults_for_provider(provider: &str) -> RoutingConfig {
                 task_overrides: HashMap::from([("coding".into(), channel.clone())]),
                 fallbacks: HashMap::new(),
                 rate_limit_cooldown_secs: 60,
+                ..RoutingConfig::default()
             }
         }
         "mistral" => {
@@ -242,6 +291,7 @@ pub fn defaults_for_provider(provider: &str) -> RoutingConfig {
                 task_overrides: HashMap::from([("coding".into(), channel.clone())]),
                 fallbacks: HashMap::from([(channel, vec![worker])]),
                 rate_limit_cooldown_secs: 60,
+                ..RoutingConfig::default()
             }
         }
         "nvidia" => RoutingConfig::for_model("nvidia/meta/llama-3.1-405b-instruct".into()),
@@ -257,6 +307,7 @@ pub fn defaults_for_provider(provider: &str) -> RoutingConfig {
                 task_overrides: HashMap::from([("coding".into(), channel.clone())]),
                 fallbacks: HashMap::new(),
                 rate_limit_cooldown_secs: 60,
+                ..RoutingConfig::default()
             }
         }
         "minimax" => {
@@ -271,6 +322,7 @@ pub fn defaults_for_provider(provider: &str) -> RoutingConfig {
                 task_overrides: HashMap::from([("coding".into(), channel.clone())]),
                 fallbacks: HashMap::new(),
                 rate_limit_cooldown_secs: 60,
+                ..RoutingConfig::default()
             }
         }
         _ => RoutingConfig::default(),

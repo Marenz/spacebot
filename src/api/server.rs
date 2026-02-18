@@ -19,6 +19,7 @@ use std::sync::Arc;
 #[allow(unused)]
 struct InterfaceAssets;
 
+
 /// Start the HTTP server on the given address.
 ///
 /// The caller provides a pre-built `ApiState` so agent event streams and
