@@ -68,7 +68,7 @@ impl SpacebotModel {
         match self.provider.as_str() {
             "anthropic" => {
                 let url = self.llm_manager.get_base_url("anthropic");
-                self.call_anthropic_compatible(request, "anthropic", "Anthropic", url).await
+                self.call_anthropic(request, url).await
             }
             "openai" => {
                 let url = self.llm_manager.get_base_url("openai");
@@ -129,10 +129,9 @@ impl SpacebotModel {
                     "https://integrate.api.nvidia.com/v1/chat/completions",
                 ).await
             }
-            // MiniMax exposes an Anthropic-compatible messages endpoint.
             "minimax" => {
                 let url = self.llm_manager.get_base_url("minimax");
-                self.call_anthropic_compatible(request, "minimax", "MiniMax", url).await
+                self.call_openai_compatible(request, "minimax", "MiniMax", url).await
             }
             other => Err(CompletionError::ProviderError(format!(
                 "unknown provider: {other}"
@@ -353,18 +352,16 @@ impl CompletionModel for SpacebotModel {
 }
 
 impl SpacebotModel {
-    /// Generic Anthropic-compatible API call.
-    /// Used by providers that implement the Anthropic messages format.
-    async fn call_anthropic_compatible(
+    /// Anthropic API call with OAuth, adaptive thinking, prompt caching, and tool normalization.
+    /// Only used for the Anthropic provider.
+    async fn call_anthropic(
         &self,
         request: CompletionRequest,
-        provider_id: &str,
-        provider_display_name: &str,
         endpoint: &str,
     ) -> Result<completion::CompletionResponse<RawResponse>, CompletionError> {
         let api_key = self
             .llm_manager
-            .get_api_key(provider_id)
+            .get_api_key("anthropic")
             .map_err(|e| CompletionError::ProviderError(e.to_string()))?;
 
         let effort = self
@@ -378,6 +375,7 @@ impl SpacebotModel {
             &self.model_name,
             &request,
             effort,
+            endpoint,
         );
 
         let is_oauth =
@@ -398,7 +396,7 @@ impl SpacebotModel {
 
         let response_body: serde_json::Value = serde_json::from_str(&response_text)
             .map_err(|e| CompletionError::ProviderError(format!(
-                "{provider_display_name} response ({status}) is not valid JSON: {e}\nBody: {}", truncate_body(&response_text)
+                "Anthropic response ({status}) is not valid JSON: {e}\nBody: {}", truncate_body(&response_text)
             )))?;
 
         if !status.is_success() {
@@ -406,7 +404,7 @@ impl SpacebotModel {
                 .as_str()
                 .unwrap_or("unknown error");
             return Err(CompletionError::ProviderError(format!(
-                "{provider_display_name} API error ({status}): {message}"
+                "Anthropic API error ({status}): {message}"
             )));
         }
 

@@ -7,7 +7,6 @@ use super::tools;
 use reqwest::RequestBuilder;
 use rig::completion::CompletionRequest;
 
-const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
 const CLAUDE_CODE_SYSTEM_PREAMBLE: &str =
     "You are Claude Code, Anthropic's official CLI for Claude.";
 
@@ -42,11 +41,12 @@ pub fn build_anthropic_request(
     model_name: &str,
     request: &CompletionRequest,
     thinking_effort: &str,
+    endpoint: &str,
 ) -> AnthropicRequest {
     let is_oauth = auth::detect_auth_path(api_key) == AnthropicAuthPath::OAuthToken;
     let adaptive_thinking = supports_adaptive_thinking(model_name);
     let retention = cache::resolve_cache_retention(None);
-    let cache_control = cache::get_cache_control(ANTHROPIC_API_URL, retention);
+    let cache_control = cache::get_cache_control(endpoint, retention);
 
     let mut body = serde_json::json!({
         "model": model_name,
@@ -68,13 +68,19 @@ pub fn build_anthropic_request(
         body["thinking"] = serde_json::json!({ "type": "adaptive" });
         let effort = match thinking_effort {
             "max" | "high" | "medium" | "low" => thinking_effort,
-            _ => if is_opus(model_name) { "max" } else { "high" },
+            _ => {
+                if is_opus(model_name) {
+                    "max"
+                } else {
+                    "high"
+                }
+            }
         };
         body["output_config"] = serde_json::json!({ "effort": effort });
     }
 
     let builder = http_client
-        .post(ANTHROPIC_API_URL)
+        .post(endpoint)
         .header("anthropic-version", "2023-06-01")
         .header("content-type", "application/json");
 

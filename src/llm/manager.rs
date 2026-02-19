@@ -25,7 +25,7 @@ const DEFAULT_DEEPSEEK_BASE_URL: &str = "https://api.deepseek.com/v1/chat/comple
 const DEFAULT_XAI_BASE_URL: &str = "https://api.x.ai/v1/chat/completions";
 const DEFAULT_MISTRAL_BASE_URL: &str = "https://api.mistral.ai/v1/chat/completions";
 const DEFAULT_OPENCODE_ZEN_BASE_URL: &str = "https://opencode.ai/zen/v1/chat/completions";
-const DEFAULT_MINIMAX_BASE_URL: &str = "https://api.minimax.io/anthropic/v1/messages";
+const DEFAULT_MINIMAX_BASE_URL: &str = "https://api.minimax.io/v1/chat/completions";
 
 /// Manages LLM provider clients and tracks rate limit state.
 pub struct LlmManager {
