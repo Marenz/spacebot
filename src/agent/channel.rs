@@ -868,6 +868,12 @@ impl Channel {
             guard.clone()
         };
 
+        // Snapshot length so we can roll back on hard errors (CompletionError,
+        // ToolError, ToolServerError). Rig mutates `history` in-place as it runs;
+        // if it fails mid-turn the Vec may contain a dangling tool-call message
+        // with no corresponding result, which poisons every subsequent turn.
+        let history_len_before = history.len();
+
         let mut result = agent
             .prompt(user_text)
             .with_history(&mut history)
@@ -889,10 +895,40 @@ impl Channel {
                 .await;
         }
 
-        // Write history back after the agentic loop completes
+        // Write history back after the agentic loop completes.
+        // On hard errors (CompletionError / ToolError / ToolServerError) Rig does
+        // not carry the history back in the error variant, but it has already
+        // mutated `history` in-place and may have left dangling tool-call messages.
+        // Roll back to the pre-call snapshot so the next turn starts clean.
+        //
+        // PromptCancelled must also roll back: Rig captures the history snapshot
+        // *before* the tool batch executes (inside the tool execution closure), so
+        // the carried history contains the assistant's tool-call message but NOT the
+        // tool results. Writing that back leaves a dangling tool-call that poisons
+        // every subsequent turn with "tool call result does not follow tool call".
+        // The side-effects (reply sent, worker spawned, etc.) have already happened;
+        // we don't need the history to reflect them.
+        //
+        // MaxTurnsError is safe to write back — Rig pushes all tool results into a
+        // User message before it raises the error, so the history is consistent.
         {
             let mut guard = self.state.history.write().await;
-            *guard = history;
+            match &result {
+                Ok(_) | Err(rig::completion::PromptError::MaxTurnsError { .. }) => {
+                    *guard = history;
+                }
+                Err(rig::completion::PromptError::PromptCancelled { .. }) | Err(_) => {
+                    // Roll back — PromptCancelled history is missing tool results
+                    // (captured before tool batch runs). Hard errors may have
+                    // dangling tool-call messages.
+                    tracing::debug!(
+                        channel_id = %self.id,
+                        rolled_back = history.len().saturating_sub(history_len_before),
+                        "rolling back history after cancelled or failed turn"
+                    );
+                    guard.truncate(history_len_before);
+                }
+            }
         }
 
         if let Err(error) = crate::tools::remove_channel_tools(&self.tool_server).await {
