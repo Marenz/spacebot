@@ -41,6 +41,7 @@ pub mod set_status;
 pub mod shell;
 pub mod skip;
 pub mod spawn_worker;
+pub mod transcribe_audio;
 pub mod web_search;
 
 pub use branch_tool::{BranchArgs, BranchError, BranchOutput, BranchTool};
@@ -76,10 +77,14 @@ pub use set_status::{SetStatusArgs, SetStatusError, SetStatusOutput, SetStatusTo
 pub use shell::{ShellArgs, ShellError, ShellOutput, ShellResult, ShellTool};
 pub use skip::{SkipArgs, SkipError, SkipFlag, SkipOutput, SkipTool, new_skip_flag};
 pub use spawn_worker::{SpawnWorkerArgs, SpawnWorkerError, SpawnWorkerOutput, SpawnWorkerTool};
+pub use transcribe_audio::{
+    TranscribeAudioArgs, TranscribeAudioError, TranscribeAudioOutput, TranscribeAudioTool,
+};
 pub use web_search::{SearchResult, WebSearchArgs, WebSearchError, WebSearchOutput, WebSearchTool};
 
 use crate::agent::channel::ChannelState;
 use crate::config::BrowserConfig;
+use crate::llm::manager::LlmManager;
 use crate::memory::MemorySearch;
 use crate::{AgentId, ChannelId, OutboundResponse, ProcessEvent, WorkerId};
 use rig::tool::Tool as _;
@@ -272,6 +277,9 @@ pub fn create_worker_tool_server(
     workspace: PathBuf,
     instance_dir: PathBuf,
     mcp_tools: Vec<McpToolAdapter>,
+    voice_model: String,
+    llm_manager: Arc<LlmManager>,
+    http: reqwest::Client,
 ) -> ToolServerHandle {
     let mut server = ToolServer::new()
         .tool(ShellTool::new(instance_dir.clone(), workspace.clone()))
@@ -280,6 +288,14 @@ pub fn create_worker_tool_server(
         .tool(SetStatusTool::new(
             agent_id, worker_id, channel_id, event_tx,
         ));
+
+    if !voice_model.is_empty() {
+        server = server.tool(TranscribeAudioTool::new(
+            voice_model,
+            llm_manager,
+            http,
+        ));
+    }
 
     if browser_config.enabled {
         server = server.tool(BrowserTool::new(browser_config, screenshot_dir));
