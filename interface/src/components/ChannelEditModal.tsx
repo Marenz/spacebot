@@ -43,6 +43,7 @@ export function ChannelEditModal({platform, name, status, open, onOpenChange}: C
 		workspace_id: "",
 		chat_id: "",
 		channel_ids: [] as string[],
+		require_mention: false,
 		dm_allowed_users: [] as string[],
 	});
 
@@ -131,7 +132,7 @@ export function ChannelEditModal({platform, name, status, open, onOpenChange}: C
 	});
 
 	function resetBindingForm() {
-		setBindingForm({agent_id: agentsData?.agents?.[0]?.id ?? "main", guild_id: "", workspace_id: "", chat_id: "", channel_ids: [], dm_allowed_users: []});
+		setBindingForm({agent_id: agentsData?.agents?.[0]?.id ?? "main", guild_id: "", workspace_id: "", chat_id: "", channel_ids: [], require_mention: false, dm_allowed_users: []});
 	}
 
 	function handleClose() {
@@ -163,6 +164,9 @@ export function ChannelEditModal({platform, name, status, open, onOpenChange}: C
 			request.platform_credentials = {
 				twitch_username: credentialInputs.twitch_username.trim(),
 				twitch_oauth_token: credentialInputs.twitch_oauth_token.trim(),
+				twitch_client_id: credentialInputs.twitch_client_id?.trim(),
+				twitch_client_secret: credentialInputs.twitch_client_secret?.trim(),
+				twitch_refresh_token: credentialInputs.twitch_refresh_token?.trim(),
 			};
 		}
 		saveCreds.mutate(request);
@@ -174,6 +178,7 @@ export function ChannelEditModal({platform, name, status, open, onOpenChange}: C
 		if (platform === "slack" && bindingForm.workspace_id.trim()) request.workspace_id = bindingForm.workspace_id.trim();
 		if (platform === "telegram" && bindingForm.chat_id.trim()) request.chat_id = bindingForm.chat_id.trim();
 		if (bindingForm.channel_ids.length > 0) request.channel_ids = bindingForm.channel_ids;
+		if (platform === "discord" && bindingForm.require_mention) request.require_mention = true;
 		if (bindingForm.dm_allowed_users.length > 0) request.dm_allowed_users = bindingForm.dm_allowed_users;
 		addBinding.mutate(request);
 	}
@@ -193,6 +198,7 @@ export function ChannelEditModal({platform, name, status, open, onOpenChange}: C
 		if (platform === "slack" && bindingForm.workspace_id.trim()) request.workspace_id = bindingForm.workspace_id.trim();
 		if (platform === "telegram" && bindingForm.chat_id.trim()) request.chat_id = bindingForm.chat_id.trim();
 		request.channel_ids = bindingForm.channel_ids;
+		request.require_mention = platform === "discord" ? bindingForm.require_mention : false;
 		request.dm_allowed_users = bindingForm.dm_allowed_users;
 		updateBinding.mutate(request);
 	}
@@ -214,6 +220,7 @@ export function ChannelEditModal({platform, name, status, open, onOpenChange}: C
 			workspace_id: binding.workspace_id || "",
 			chat_id: binding.chat_id || "",
 			channel_ids: binding.channel_ids,
+			require_mention: binding.require_mention,
 			dm_allowed_users: binding.dm_allowed_users,
 		});
 	}
@@ -299,16 +306,49 @@ export function ChannelEditModal({platform, name, status, open, onOpenChange}: C
 									placeholder={configured ? "Enter new username to update" : "my_bot"}
 								/>
 							</div>
-							<div>
-								<label className="mb-1.5 block text-sm font-medium text-ink-dull">OAuth Token</label>
-								<Input
-									type="password"
-									value={credentialInputs.twitch_oauth_token ?? ""}
-									onChange={(e) => setCredentialInputs({...credentialInputs, twitch_oauth_token: e.target.value})}
-									placeholder={configured ? "Enter new token to update" : "oauth:abc123..."}
-									onKeyDown={(e) => { if (e.key === "Enter") handleSaveCredentials(); }}
-								/>
+							<div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+								<div>
+									<label className="mb-1.5 block text-sm font-medium text-ink-dull">Client ID</label>
+									<Input
+										value={credentialInputs.twitch_client_id ?? ""}
+										onChange={(e) => setCredentialInputs({...credentialInputs, twitch_client_id: e.target.value})}
+										placeholder={configured ? "Enter new client id to update" : "your-app-client-id"}
+									/>
+								</div>
+								<div>
+									<label className="mb-1.5 block text-sm font-medium text-ink-dull">Client Secret</label>
+									<Input
+										type="password"
+										value={credentialInputs.twitch_client_secret ?? ""}
+										onChange={(e) => setCredentialInputs({...credentialInputs, twitch_client_secret: e.target.value})}
+										placeholder={configured ? "Enter new client secret to update" : "your-app-client-secret"}
+									/>
+								</div>
 							</div>
+							<div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+								<div>
+									<label className="mb-1.5 block text-sm font-medium text-ink-dull">OAuth Access Token</label>
+									<Input
+										type="password"
+										value={credentialInputs.twitch_oauth_token ?? ""}
+										onChange={(e) => setCredentialInputs({...credentialInputs, twitch_oauth_token: e.target.value})}
+										placeholder={configured ? "Enter new token to update" : "abcd1234..."}
+										onKeyDown={(e) => { if (e.key === "Enter") handleSaveCredentials(); }}
+									/>
+								</div>
+								<div>
+									<label className="mb-1.5 block text-sm font-medium text-ink-dull">OAuth Refresh Token</label>
+									<Input
+										type="password"
+										value={credentialInputs.twitch_refresh_token ?? ""}
+										onChange={(e) => setCredentialInputs({...credentialInputs, twitch_refresh_token: e.target.value})}
+										placeholder={configured ? "Enter new refresh token to update" : "refresh-token-from-twitch"}
+									/>
+								</div>
+							</div>
+							<p className="mt-1.5 text-xs text-ink-faint">
+								Use tokens from your Twitch application with chat:read and chat:write scopes enabled. Tokens are stored in your Spacebot instance and refreshed automatically while running.
+							</p>
 							<p className="mt-1.5 text-xs text-ink-faint">
 								Need help?{" "}
 								<a href="https://docs.spacebot.sh/twitch-setup" target="_blank" rel="noopener noreferrer" className="text-accent hover:underline">
@@ -364,6 +404,7 @@ export function ChannelEditModal({platform, name, status, open, onOpenChange}: C
 												{binding.workspace_id && <span>Workspace: {binding.workspace_id}</span>}
 												{binding.chat_id && <span>Chat: {binding.chat_id}</span>}
 												{binding.channel_ids.length > 0 && <span>{binding.channel_ids.length} channel{binding.channel_ids.length > 1 ? "s" : ""}</span>}
+												{binding.require_mention && <span>Mention only</span>}
 												{binding.dm_allowed_users.length > 0 && <span>{binding.dm_allowed_users.length} DM user{binding.dm_allowed_users.length > 1 ? "s" : ""}</span>}
 												{!binding.guild_id && !binding.workspace_id && !binding.chat_id && binding.channel_ids.length === 0 && (
 													<span>All conversations</span>
@@ -443,6 +484,18 @@ export function ChannelEditModal({platform, name, status, open, onOpenChange}: C
 											onChange={(ids) => setBindingForm({...bindingForm, channel_ids: ids})}
 											placeholder="Add channel ID..."
 										/>
+									</div>
+								)}
+
+								{platform === "discord" && (
+									<div className="flex items-center gap-2">
+										<input
+											type="checkbox"
+											checked={bindingForm.require_mention}
+											onChange={(e) => setBindingForm({...bindingForm, require_mention: e.target.checked})}
+											className="h-4 w-4 rounded border-app-line bg-app-box"
+										/>
+										<label className="text-sm text-ink-dull">Require @mention or reply to bot</label>
 									</div>
 								)}
 

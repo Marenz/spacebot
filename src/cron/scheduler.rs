@@ -9,8 +9,10 @@ use crate::agent::channel::Channel;
 use crate::cron::store::CronStore;
 use crate::error::Result;
 use crate::messaging::MessagingManager;
+use crate::messaging::target::{BroadcastTarget, parse_delivery_target};
 use crate::{AgentDeps, InboundMessage, MessageContent, OutboundResponse};
 use chrono::Timelike;
+use chrono_tz::Tz;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -22,42 +24,14 @@ pub struct CronJob {
     pub id: String,
     pub prompt: String,
     pub interval_secs: u64,
-    pub delivery_target: DeliveryTarget,
+    pub delivery_target: BroadcastTarget,
     pub active_hours: Option<(u8, u8)>,
     pub enabled: bool,
+    pub run_once: bool,
     pub consecutive_failures: u32,
     /// Maximum wall-clock seconds to wait for the job to complete.
     /// `None` uses the default of 120 seconds.
     pub timeout_secs: Option<u64>,
-}
-
-/// Where to send cron job results.
-#[derive(Debug, Clone)]
-pub struct DeliveryTarget {
-    /// Messaging adapter name (e.g. "discord").
-    pub adapter: String,
-    /// Platform-specific target (e.g. a Discord channel ID).
-    pub target: String,
-}
-
-impl DeliveryTarget {
-    /// Parse a delivery target string in the format "adapter:target".
-    pub fn parse(raw: &str) -> Option<Self> {
-        let (adapter, target) = raw.split_once(':')?;
-        if adapter.is_empty() || target.is_empty() {
-            return None;
-        }
-        Some(Self {
-            adapter: adapter.to_string(),
-            target: target.to_string(),
-        })
-    }
-}
-
-impl std::fmt::Display for DeliveryTarget {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}:{}", self.adapter, self.target)
-    }
 }
 
 /// Serializable cron job config (for storage and TOML parsing).
@@ -72,6 +46,8 @@ pub struct CronConfig {
     pub active_hours: Option<(u8, u8)>,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    #[serde(default)]
+    pub run_once: bool,
     /// Maximum wall-clock seconds to wait for the job to complete.
     /// `None` uses the default of 120 seconds.
     pub timeout_secs: Option<u64>,
@@ -100,6 +76,7 @@ pub struct CronContext {
 }
 
 const MAX_CONSECUTIVE_FAILURES: u32 = 3;
+const SYSTEM_TIMEZONE_LABEL: &str = "system";
 
 /// Scheduler that manages cron job timers and execution.
 pub struct Scheduler {
@@ -123,19 +100,18 @@ impl Scheduler {
         }
     }
 
+    pub fn cron_timezone_label(&self) -> String {
+        cron_timezone_label(&self.context)
+    }
+
     /// Register and start a cron job from config.
     pub async fn register(&self, config: CronConfig) -> Result<()> {
-        let delivery_target = DeliveryTarget::parse(&config.delivery_target).unwrap_or_else(|| {
-            tracing::warn!(
-                cron_id = %config.id,
-                raw_target = %config.delivery_target,
-                "invalid delivery target format, expected 'adapter:target'"
-            );
-            DeliveryTarget {
-                adapter: "unknown".into(),
-                target: config.delivery_target.clone(),
-            }
-        });
+        let delivery_target = parse_delivery_target(&config.delivery_target).ok_or_else(|| {
+            crate::error::Error::Other(anyhow::anyhow!(
+                "invalid delivery target '{}': expected format 'adapter:target'",
+                config.delivery_target
+            ))
+        })?;
 
         let job = CronJob {
             id: config.id.clone(),
@@ -144,6 +120,7 @@ impl Scheduler {
             delivery_target,
             active_hours: config.active_hours,
             enabled: config.enabled,
+            run_once: config.run_once,
             consecutive_failures: 0,
             timeout_secs: config.timeout_secs,
         };
@@ -157,7 +134,7 @@ impl Scheduler {
             self.start_timer(&config.id).await;
         }
 
-        tracing::info!(cron_id = %config.id, interval_secs = config.interval_secs, "cron job registered");
+        tracing::info!(cron_id = %config.id, interval_secs = config.interval_secs, run_once = config.run_once, "cron job registered");
         Ok(())
     }
 
@@ -185,9 +162,7 @@ impl Scheduler {
             // Look up interval before entering the loop
             let interval_secs = {
                 let j = jobs.read().await;
-                j.get(&job_id)
-                    .map(|j| j.interval_secs)
-                    .unwrap_or(3600)
+                j.get(&job_id).map(|j| j.interval_secs).unwrap_or(3600)
             };
 
             // For sub-daily intervals that divide evenly into 86400 (e.g. 1800s, 3600s, 21600s),
@@ -201,7 +176,11 @@ impl Scheduler {
                     .unwrap_or_default()
                     .as_secs();
                 let remainder = now_unix % interval_secs;
-                let secs_until = if remainder == 0 { interval_secs } else { interval_secs - remainder };
+                let secs_until = if remainder == 0 {
+                    interval_secs
+                } else {
+                    interval_secs - remainder
+                };
                 tracing::info!(
                     cron_id = %job_id,
                     interval_secs,
@@ -213,7 +192,8 @@ impl Scheduler {
                 tokio::time::Instant::now() + Duration::from_secs(interval_secs)
             };
 
-            let mut ticker = tokio::time::interval_at(first_tick, Duration::from_secs(interval_secs));
+            let mut ticker =
+                tokio::time::interval_at(first_tick, Duration::from_secs(interval_secs));
             // Skip catch-up ticks if processing falls behind — maintain original cadence.
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -237,16 +217,12 @@ impl Scheduler {
 
                 // Check active hours window
                 if let Some((start, end)) = job.active_hours {
-                    let current_hour = chrono::Local::now().hour() as u8;
-                    let in_window = if start <= end {
-                        current_hour >= start && current_hour < end
-                    } else {
-                        // Wraps midnight (e.g. 22:00 - 06:00)
-                        current_hour >= start || current_hour < end
-                    };
+                    let (current_hour, timezone) = current_hour_and_timezone(&context, &job_id);
+                    let in_window = hour_in_active_window(current_hour, start, end);
                     if !in_window {
                         tracing::debug!(
                             cron_id = %job_id,
+                            cron_timezone = %timezone,
                             current_hour,
                             start,
                             end,
@@ -304,6 +280,23 @@ impl Scheduler {
                             break;
                         }
                     }
+                }
+
+                if job.run_once {
+                    tracing::info!(cron_id = %job_id, "run-once cron completed, disabling");
+
+                    {
+                        let mut j = jobs.write().await;
+                        if let Some(j) = j.get_mut(&job_id) {
+                            j.enabled = false;
+                        }
+                    }
+
+                    if let Err(error) = context.store.update_enabled(&job_id, false).await {
+                        tracing::error!(%error, "failed to persist run-once cron disabled state");
+                    }
+
+                    break;
                 }
             }
         });
@@ -410,27 +403,34 @@ impl Scheduler {
             let config = configs
                 .into_iter()
                 .find(|c| c.id == job_id)
-                .ok_or_else(|| crate::error::Error::Other(anyhow::anyhow!("cron job not found in store")))?;
+                .ok_or_else(|| {
+                    crate::error::Error::Other(anyhow::anyhow!("cron job not found in store"))
+                })?;
 
-            let delivery_target = DeliveryTarget::parse(&config.delivery_target).unwrap_or_else(|| {
-                DeliveryTarget {
-                    adapter: "unknown".into(),
-                    target: config.delivery_target.clone(),
-                }
-            });
+            let delivery_target =
+                parse_delivery_target(&config.delivery_target).ok_or_else(|| {
+                    crate::error::Error::Other(anyhow::anyhow!(
+                        "invalid delivery target '{}': expected format 'adapter:target'",
+                        config.delivery_target
+                    ))
+                })?;
 
             {
                 let mut jobs = self.jobs.write().await;
-                jobs.insert(job_id.to_string(), CronJob {
-                    id: config.id.clone(),
-                    prompt: config.prompt,
-                    interval_secs: config.interval_secs,
-                    delivery_target,
-                    active_hours: config.active_hours,
-                    enabled: true,
-                    consecutive_failures: 0,
-                    timeout_secs: config.timeout_secs,
-                });
+                jobs.insert(
+                    job_id.to_string(),
+                    CronJob {
+                        id: config.id.clone(),
+                        prompt: config.prompt,
+                        interval_secs: config.interval_secs,
+                        delivery_target,
+                        active_hours: config.active_hours,
+                        enabled: true,
+                        run_once: config.run_once,
+                        consecutive_failures: 0,
+                        timeout_secs: config.timeout_secs,
+                    },
+                );
             }
 
             self.start_timer(job_id).await;
@@ -447,7 +447,9 @@ impl Scheduler {
                 old
             } else {
                 // Should not happen (we checked above), but be defensive.
-                return Err(crate::error::Error::Other(anyhow::anyhow!("cron job not found")));
+                return Err(crate::error::Error::Other(anyhow::anyhow!(
+                    "cron job not found"
+                )));
             }
         };
 
@@ -469,6 +471,51 @@ impl Scheduler {
         }
 
         Ok(())
+    }
+}
+
+fn cron_timezone_label(context: &CronContext) -> String {
+    let timezone = context.deps.runtime_config.cron_timezone.load();
+    match timezone.as_deref() {
+        Some(name) if name.parse::<Tz>().is_ok() => name.to_string(),
+        _ => SYSTEM_TIMEZONE_LABEL.to_string(),
+    }
+}
+
+fn current_hour_and_timezone(context: &CronContext, cron_id: &str) -> (u8, String) {
+    let timezone = context.deps.runtime_config.cron_timezone.load();
+    match timezone.as_deref() {
+        Some(name) => match name.parse::<Tz>() {
+            Ok(timezone) => (
+                chrono::Utc::now().with_timezone(&timezone).hour() as u8,
+                name.into(),
+            ),
+            Err(error) => {
+                tracing::warn!(
+                    agent_id = %context.deps.agent_id,
+                    cron_id,
+                    cron_timezone = %name,
+                    %error,
+                    "invalid cron timezone in runtime config, falling back to system timezone"
+                );
+                (
+                    chrono::Local::now().hour() as u8,
+                    SYSTEM_TIMEZONE_LABEL.into(),
+                )
+            }
+        },
+        None => (
+            chrono::Local::now().hour() as u8,
+            SYSTEM_TIMEZONE_LABEL.into(),
+        ),
+    }
+}
+
+fn hour_in_active_window(current_hour: u8, start_hour: u8, end_hour: u8) -> bool {
+    if start_hour <= end_hour {
+        current_hour >= start_hour && current_hour < end_hour
+    } else {
+        current_hour >= start_hour || current_hour < end_hour
     }
 }
 
@@ -556,16 +603,6 @@ async fn run_cron_job(job: &CronJob, context: &CronContext) -> Result<()> {
     let result_text = collected_text.join("\n\n");
     let has_result = !result_text.trim().is_empty();
 
-    // Log execution
-    let summary = if has_result {
-        Some(result_text.as_str())
-    } else {
-        None
-    };
-    if let Err(error) = context.store.log_execution(&job.id, true, summary).await {
-        tracing::warn!(%error, "failed to log cron execution");
-    }
-
     // Deliver result to target (only if there's something to say)
     if has_result {
         if let Err(error) = context
@@ -573,7 +610,7 @@ async fn run_cron_job(job: &CronJob, context: &CronContext) -> Result<()> {
             .broadcast(
                 &job.delivery_target.adapter,
                 &job.delivery_target.target,
-                OutboundResponse::Text(result_text),
+                OutboundResponse::Text(result_text.clone()),
             )
             .await
         {
@@ -583,11 +620,13 @@ async fn run_cron_job(job: &CronJob, context: &CronContext) -> Result<()> {
                 %error,
                 "failed to deliver cron result"
             );
-            // Log the delivery failure
-            let _ = context
+            if let Err(log_error) = context
                 .store
                 .log_execution(&job.id, false, Some(&error.to_string()))
-                .await;
+                .await
+            {
+                tracing::warn!(%log_error, "failed to log cron execution");
+            }
             return Err(error);
         }
 
@@ -600,5 +639,34 @@ async fn run_cron_job(job: &CronJob, context: &CronContext) -> Result<()> {
         tracing::debug!(cron_id = %job.id, "cron job produced no output, skipping delivery");
     }
 
+    let summary = if has_result {
+        Some(result_text.as_str())
+    } else {
+        None
+    };
+    if let Err(error) = context.store.log_execution(&job.id, true, summary).await {
+        tracing::warn!(%error, "failed to log cron execution");
+    }
+
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::hour_in_active_window;
+
+    #[test]
+    fn test_hour_in_active_window_non_wrapping() {
+        assert!(hour_in_active_window(9, 9, 17));
+        assert!(hour_in_active_window(16, 9, 17));
+        assert!(!hour_in_active_window(8, 9, 17));
+        assert!(!hour_in_active_window(17, 9, 17));
+    }
+
+    #[test]
+    fn test_hour_in_active_window_midnight_wrapping() {
+        assert!(hour_in_active_window(22, 22, 6));
+        assert!(hour_in_active_window(3, 22, 6));
+        assert!(!hour_in_active_window(12, 22, 6));
+    }
 }

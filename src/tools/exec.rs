@@ -44,17 +44,14 @@ impl ExecTool {
 
         // Block references to sensitive files by name
         for file in super::shell::SENSITIVE_FILES {
-            if all_args.contains(file) {
-                if all_args.contains(instance_str.as_ref())
-                    || !all_args.contains(workspace_str.as_ref())
-                {
-                    return Err(ExecError {
-                        message: format!(
-                            "Cannot access {file} — instance configuration is protected."
-                        ),
-                        exit_code: -1,
-                    });
-                }
+            if all_args.contains(file)
+                && (all_args.contains(instance_str.as_ref())
+                    || !all_args.contains(workspace_str.as_ref()))
+            {
+                return Err(ExecError {
+                    message: format!("Cannot access {file} — instance configuration is protected."),
+                    exit_code: -1,
+                });
             }
         }
 
@@ -84,7 +81,10 @@ pub struct ExecArgs {
     #[serde(default)]
     pub env: Vec<EnvVar>,
     /// Timeout in seconds (default: 60).
-    #[serde(default = "default_timeout")]
+    #[serde(
+        default = "default_timeout",
+        deserialize_with = "crate::tools::deserialize_string_or_u64"
+    )]
     pub timeout_seconds: u64,
 }
 
@@ -212,6 +212,37 @@ impl Tool for ExecTool {
             }
         }
 
+        // Block env vars that enable library injection or alter runtime
+        // loading behavior — these allow arbitrary code execution.
+        const DANGEROUS_ENV_VARS: &[&str] = &[
+            "LD_PRELOAD",
+            "LD_LIBRARY_PATH",
+            "DYLD_INSERT_LIBRARIES",
+            "DYLD_LIBRARY_PATH",
+            "PYTHONPATH",
+            "PYTHONSTARTUP",
+            "NODE_OPTIONS",
+            "RUBYOPT",
+            "PERL5OPT",
+            "PERL5LIB",
+            "BASH_ENV",
+            "ENV",
+        ];
+        for env_var in &args.env {
+            if DANGEROUS_ENV_VARS
+                .iter()
+                .any(|blocked| env_var.key.eq_ignore_ascii_case(blocked))
+            {
+                return Err(ExecError {
+                    message: format!(
+                        "Cannot set {}: this environment variable enables code injection.",
+                        env_var.key
+                    ),
+                    exit_code: -1,
+                });
+            }
+        }
+
         let mut cmd = Command::new(&args.program);
         cmd.args(&args.args);
 
@@ -319,12 +350,8 @@ pub async fn exec(
 
     let output = tokio::time::timeout(tokio::time::Duration::from_secs(60), cmd.output())
         .await
-        .map_err(|_| {
-            crate::error::AgentError::Other(anyhow::anyhow!("Execution timed out").into())
-        })?
-        .map_err(|e| {
-            crate::error::AgentError::Other(anyhow::anyhow!("Failed to execute: {e}").into())
-        })?;
+        .map_err(|_| crate::error::AgentError::Other(anyhow::anyhow!("Execution timed out")))?
+        .map_err(|e| crate::error::AgentError::Other(anyhow::anyhow!("Failed to execute: {e}")))?;
 
     Ok(ExecResult {
         success: output.status.success(),
@@ -342,5 +369,3 @@ pub struct ExecResult {
     pub stdout: String,
     pub stderr: String,
 }
-
-use anyhow::Context as _;

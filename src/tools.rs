@@ -28,6 +28,7 @@ pub mod channel_recall;
 pub mod cron;
 pub mod exec;
 pub mod file;
+pub mod mcp;
 pub mod memory_delete;
 pub mod memory_recall;
 pub mod memory_save;
@@ -54,6 +55,7 @@ pub use channel_recall::{
 pub use cron::{CronArgs, CronError, CronOutput, CronTool};
 pub use exec::{EnvVar, ExecArgs, ExecError, ExecOutput, ExecResult, ExecTool};
 pub use file::{FileArgs, FileEntry, FileEntryOutput, FileError, FileOutput, FileTool, FileType};
+pub use mcp::{McpToolAdapter, McpToolError, McpToolOutput};
 pub use memory_delete::{
     MemoryDeleteArgs, MemoryDeleteError, MemoryDeleteOutput, MemoryDeleteTool,
 };
@@ -85,6 +87,51 @@ use rig::tool::server::{ToolServer, ToolServerHandle};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
+
+/// Deserialize a `u64` that may arrive as either a JSON number or a JSON string.
+///
+/// LLMs sometimes send `"timeout_seconds": "400"` instead of `"timeout_seconds": 400`.
+/// This helper accepts both forms so the tool call doesn't fail on a type mismatch.
+pub fn deserialize_string_or_u64<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de;
+
+    struct StringOrU64;
+
+    impl<'de> de::Visitor<'de> for StringOrU64 {
+        type Value = u64;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a u64 or a string containing a u64")
+        }
+
+        fn visit_u64<E: de::Error>(self, value: u64) -> Result<u64, E> {
+            Ok(value)
+        }
+
+        fn visit_i64<E: de::Error>(self, value: i64) -> Result<u64, E> {
+            u64::try_from(value).map_err(|_| E::custom(format!("negative value: {value}")))
+        }
+
+        fn visit_f64<E: de::Error>(self, value: f64) -> Result<u64, E> {
+            if value >= 0.0 && value <= u64::MAX as f64 && value.fract() == 0.0 {
+                Ok(value as u64)
+            } else {
+                Err(E::custom(format!("invalid timeout value: {value}")))
+            }
+        }
+
+        fn visit_str<E: de::Error>(self, value: &str) -> Result<u64, E> {
+            value
+                .parse::<u64>()
+                .map_err(|_| E::custom(format!("cannot parse \"{value}\" as a positive integer")))
+        }
+    }
+
+    deserializer.deserialize_any(StringOrU64)
+}
 
 /// Maximum byte length for tool output strings (stdout, stderr, file content).
 /// ~50KB keeps a single tool result under ~12,500 tokens (at ~4 chars/token).
@@ -213,6 +260,7 @@ pub fn create_branch_tool_server(
 ///
 /// File operations are restricted to `workspace`. Shell and exec commands are
 /// blocked from accessing sensitive files in `instance_dir`.
+#[allow(clippy::too_many_arguments)]
 pub fn create_worker_tool_server(
     agent_id: AgentId,
     worker_id: WorkerId,
@@ -223,6 +271,7 @@ pub fn create_worker_tool_server(
     brave_search_key: Option<String>,
     workspace: PathBuf,
     instance_dir: PathBuf,
+    mcp_tools: Vec<McpToolAdapter>,
 ) -> ToolServerHandle {
     let mut server = ToolServer::new()
         .tool(ShellTool::new(instance_dir.clone(), workspace.clone()))
@@ -238,6 +287,10 @@ pub fn create_worker_tool_server(
 
     if let Some(key) = brave_search_key {
         server = server.tool(WebSearchTool::new(key));
+    }
+
+    for mcp_tool in mcp_tools {
+        server = server.tool(mcp_tool);
     }
 
     server.run()
@@ -258,6 +311,7 @@ pub fn create_cortex_tool_server(memory_search: Arc<MemorySearch>) -> ToolServer
 /// Combines branch tools (memory) with worker tools (shell, file, exec) to give
 /// the interactive cortex full capabilities. Does not include channel-specific
 /// tools (reply, react, skip) since the cortex chat doesn't talk to platforms.
+#[allow(clippy::too_many_arguments)]
 pub fn create_cortex_chat_tool_server(
     memory_search: Arc<MemorySearch>,
     conversation_logger: crate::conversation::history::ConversationLogger,
@@ -286,4 +340,50 @@ pub fn create_cortex_chat_tool_server(
     }
 
     server.run()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shell_args_parses_timeout_as_integer() {
+        let args: shell::ShellArgs =
+            serde_json::from_str(r#"{"command": "ls", "timeout_seconds": 120}"#).unwrap();
+        assert_eq!(args.timeout_seconds, 120);
+    }
+
+    #[test]
+    fn shell_args_parses_timeout_as_string() {
+        let args: shell::ShellArgs =
+            serde_json::from_str(r#"{"command": "ls", "timeout_seconds": "400"}"#).unwrap();
+        assert_eq!(args.timeout_seconds, 400);
+    }
+
+    #[test]
+    fn shell_args_uses_default_when_timeout_missing() {
+        let args: shell::ShellArgs = serde_json::from_str(r#"{"command": "ls"}"#).unwrap();
+        assert_eq!(args.timeout_seconds, 60);
+    }
+
+    #[test]
+    fn shell_args_rejects_non_numeric_string() {
+        let result: Result<shell::ShellArgs, _> =
+            serde_json::from_str(r#"{"command": "ls", "timeout_seconds": "abc"}"#);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn exec_args_parses_timeout_as_string() {
+        let args: exec::ExecArgs =
+            serde_json::from_str(r#"{"program": "/bin/ls", "timeout_seconds": "300"}"#).unwrap();
+        assert_eq!(args.timeout_seconds, 300);
+    }
+
+    #[test]
+    fn exec_args_parses_timeout_as_integer() {
+        let args: exec::ExecArgs =
+            serde_json::from_str(r#"{"program": "/bin/ls", "timeout_seconds": 90}"#).unwrap();
+        assert_eq!(args.timeout_seconds, 90);
+    }
 }

@@ -39,6 +39,8 @@ pub(super) struct CreateCronRequest {
     #[serde(default = "default_enabled")]
     enabled: bool,
     #[serde(default)]
+    run_once: bool,
+    #[serde(default)]
     timeout_secs: Option<u64>,
 }
 
@@ -76,6 +78,7 @@ struct CronJobWithStats {
     interval_secs: u64,
     delivery_target: String,
     enabled: bool,
+    run_once: bool,
     active_hours: Option<(u8, u8)>,
     timeout_secs: Option<u64>,
     success_count: u64,
@@ -86,6 +89,7 @@ struct CronJobWithStats {
 #[derive(Serialize)]
 pub(super) struct CronListResponse {
     jobs: Vec<CronJobWithStats>,
+    timezone: String,
 }
 
 #[derive(Serialize)]
@@ -105,7 +109,11 @@ pub(super) async fn list_cron_jobs(
     Query(query): Query<CronQuery>,
 ) -> Result<Json<CronListResponse>, StatusCode> {
     let stores = state.cron_stores.load();
+    let schedulers = state.cron_schedulers.load();
     let store = stores.get(&query.agent_id).ok_or(StatusCode::NOT_FOUND)?;
+    let scheduler = schedulers
+        .get(&query.agent_id)
+        .ok_or(StatusCode::NOT_FOUND)?;
 
     let configs = store.load_all_unfiltered().await.map_err(|error| {
         tracing::warn!(%error, agent_id = %query.agent_id, "failed to load cron jobs");
@@ -125,6 +133,7 @@ pub(super) async fn list_cron_jobs(
             interval_secs: config.interval_secs,
             delivery_target: config.delivery_target,
             enabled: config.enabled,
+            run_once: config.run_once,
             active_hours: config.active_hours,
             timeout_secs: config.timeout_secs,
             success_count: stats.success_count,
@@ -133,7 +142,10 @@ pub(super) async fn list_cron_jobs(
         });
     }
 
-    Ok(Json(CronListResponse { jobs }))
+    Ok(Json(CronListResponse {
+        jobs,
+        timezone: scheduler.cron_timezone_label(),
+    }))
 }
 
 /// Get execution history for cron jobs.
@@ -190,6 +202,7 @@ pub(super) async fn create_or_update_cron(
         delivery_target: request.delivery_target,
         active_hours,
         enabled: request.enabled,
+        run_once: request.run_once,
         timeout_secs: request.timeout_secs,
     };
 

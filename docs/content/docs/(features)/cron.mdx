@@ -62,6 +62,7 @@ CREATE TABLE cron_jobs (
 | `active_start_hour` | Optional start of active window (0-23, 24h local time) |
 | `active_end_hour` | Optional end of active window (0-23, 24h local time) |
 | `enabled` | Flipped to 0 by the circuit breaker after consecutive failures |
+| `run_once` | If 1, the job auto-disables after its first execution attempt |
 
 ### cron_executions
 
@@ -140,17 +141,28 @@ The tool persists to the database and registers with the running scheduler immed
 
 The tool also supports `list` (show all active cron jobs) and `delete` (remove by ID).
 
+For one-time reminders, set `run_once: true` on create. The scheduler disables the job after the first execution attempt.
+
 ### 3. Programmatic
 
 Any code with access to `CronStore` and `Scheduler` can create cron jobs. The cortex could create them based on observed patterns. A future CLI command could manage them directly.
 
 ## Active Hours
 
-The active window uses 24-hour local time. If `active_start_hour` and `active_end_hour` are both set, the cron job only fires within that window.
+The active window uses a resolved timezone for each agent:
+
+1. `agents.cron_timezone`
+2. `defaults.cron_timezone`
+3. `SPACEBOT_CRON_TIMEZONE`
+4. server local timezone
+
+If `active_start_hour` and `active_end_hour` are both set, the cron job only fires within that window.
 
 Midnight wrapping is handled: a window of `22:00-06:00` means "10pm to 6am" — the cron job fires if the current hour is >= 22 or < 6.
 
 If active hours are not set, the cron job runs at all hours.
+
+If a configured timezone is invalid, Spacebot logs a warning and falls back to server local timezone.
 
 Active hours don't affect the timer interval — the timer still ticks at `interval_secs`. When a tick lands outside the active window, it's skipped. The next tick happens at the normal interval, not "as soon as the window opens."
 
